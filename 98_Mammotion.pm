@@ -68,7 +68,7 @@ sub Mammotion_Initialize {
 }
 
 sub Mammotion_Define {
-    my ($hash, $def) = @.;
+    my ($hash, $def) = @_;
     my @args = split("[ \t][ \t]*", $def);
 
     if (@args < 4) {
@@ -98,7 +98,7 @@ sub Mammotion_Define {
 }
 
 sub Mammotion_Undef {
-    my ($hash, $arg) = @.;
+    my ($hash, $arg) = @_;
     RemoveInternalTimer($hash);
     BlockingKill($hash->{helper}) if (defined($hash->{helper}));
     $hash->{RUNNING} = 0;
@@ -106,7 +106,7 @@ sub Mammotion_Undef {
 }
 
 sub Mammotion_Set {
-    my ($hash, $name, $cmd, @args) = @.;
+    my ($hash, $name, $cmd, @args) = @_;
 
     if ($cmd eq "?") {
         my $list = join(" ", map {
@@ -159,7 +159,7 @@ sub Mammotion_Set {
                 eval { $zones = decode_json($zones_json) };
                 if ($zones && @$zones) {
                     return "Bitte Zone-Hash angeben: set $name start_zone <hash>\nVerfuegbare Zonen: " .
-                           join(", ", map { "$z->{name} (Hash: $z->{hash})" } @$zones);
+                           join(", ", map { "$\_->{name} (Hash: $_->{hash})" } @$zones);
                 }
             }
             return "Bitte Zone-Hash angeben: set $name start_zone <hash>. Erst 'get $name zones' ausfuehren.";
@@ -191,7 +191,7 @@ sub Mammotion_Set {
 }
 
 sub Mammotion_Get {
-    my ($hash, $name, $cmd, @args) = @.;
+    my ($hash, $name, $cmd, @args) = @_;
 
     if ($cmd eq "?") {
         my $list = join(" ", map { "$_: $gets{$_}" } sort keys %gets);
@@ -289,7 +289,7 @@ sub Mammotion_Get {
 }
 
 sub Mammotion_Attr {
-    my ($cmd, $name, $attr, $val) = @.;
+    my ($cmd, $name, $attr, $val) = @_;
     my $hash = $defs{$name};
 
     if ($attr eq "interval") {
@@ -303,7 +303,7 @@ sub Mammotion_Attr {
 }
 
 sub Mammotion_UpdateTimer {
-    my ($hash) = @.;
+    my ($hash) = @_;
     my $name = $hash->{NAME};
 
     Mammotion_FetchDevices($hash);
@@ -313,7 +313,7 @@ sub Mammotion_UpdateTimer {
 }
 
 sub Mammotion_FetchDevices {
-    my ($hash) = @.;
+    my ($hash) = @_;
     my $name = $hash->{NAME};
 
     if ($hash->{RUNNING}) {
@@ -355,7 +355,7 @@ sub Mammotion_FetchDevices {
 }
 
 sub Mammotion_SendCommand {
-    my ($hash, $action, $deviceName, $iotId, @extra) = @.;
+    my ($hash, $action, $deviceName, $iotId, @extra) = @_;
     my $name = $hash->{NAME};
 
     if ($hash->{RUNNING}) {
@@ -392,7 +392,7 @@ sub Mammotion_SendCommand {
 }
 
 sub Mammotion_PythonCall {
-    my ($arg) = @.;
+    my ($arg) = @_;
 
     my ($name, $account, $password, $py, $script, $action, @params) = split(/\x1F/, $arg);
 
@@ -448,7 +448,7 @@ sub Mammotion_PythonCall {
 }
 
 sub Mammotion_PythonDone {
-    my ($result) = @.;
+    my ($result) = @_;
 
     my ($name, $status, $data) = split(/\|/, $result, 3);
     my $hash = $defs{$name};
@@ -556,7 +556,7 @@ sub Mammotion_PythonDone {
 }
 
 sub Mammotion_ProcessDevices {
-    my ($hash, $json_data, $timestamp) = @.;
+    my ($hash, $json_data, $timestamp) = @_;
     my $name = $hash->{NAME};
 
     my @devices = @{$json_data->{devices} // []};
@@ -614,11 +614,11 @@ sub Mammotion_ProcessDevices {
     readingsBulkUpdate($hash, "state",  $state_str);
     readingsEndUpdate($hash, 1);
 
-    Log3($name, 3, "[$name] Update OK. $i Geraet(e). Aktiv: ${\$device->{device_name}} ($state_str) IoT-ID: ${\$hash->{IOT_ID}}");
+    Log3($name, 3, "[$name] Update OK. $i Geraet(e). Aktiv: ${\ $device->{device_name}} ($state_str) IoT-ID: ${\ $hash->{IOT_ID}};");
 }
 
 sub Mammotion_PythonTimeout {
-    my ($hash) = @.;
+    my ($hash) = @_;
     my $name = $hash->{NAME};
 
     delete $hash->{helper};
