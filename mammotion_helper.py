@@ -196,14 +196,56 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             return {"ok": True, "action": "start_zone", "zone_hash": zone_hash}
 
         elif action == "get_tasks":
-            # Try to read tasks from mower.job or mower.report_data
+            # Tasks are part of map data – trigger map sync first
+            await mammotion.start_map_sync(device_name)
+
+            # Wait until task data is stable (all MQTT packets received)
+            wait_max = 60
+            wait_step = 3
+            waited = 0
+            stable_count = 0
+            stable_needed = 2
+            last_task_count = -1
+
+            while waited < wait_max:
+                await asyncio.sleep(wait_step)
+                waited += wait_step
+                mower = mammotion.mower(device_name)
+                if mower is None:
+                    stable_count = 0
+                    last_task_count = -1
+                    continue
+
+                # Try all known attribute paths for task count
+                current_count = 0
+                for path in [
+                    lambda m: len(getattr(getattr(m, "job", None), "job_list", []) or []),
+                    lambda m: len(getattr(getattr(m, "job", None), "jobs", []) or []),
+                    lambda m: len(getattr(getattr(getattr(m, "report_data", None), "dev", None), "toapp_multi_mow_tasks_ack", []) or []),
+                ]:
+                    try:
+                        cnt = path(mower)
+                        if cnt > 0:
+                            current_count = cnt
+                            break
+                    except Exception:
+                        pass
+
+                if current_count > 0 and current_count == last_task_count:
+                    stable_count += 1
+                    if stable_count >= stable_needed:
+                        break
+                else:
+                    stable_count = 0
+                last_task_count = current_count
+
             mower = mammotion.mower(device_name)
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
             tasks = []
 
-            # Attempt 1: mower.job (pymammotion JobList)
+            # Attempt 1: mower.job.job_list / mower.job.jobs
             try:
                 job_obj = getattr(mower, "job", None)
                 if job_obj is not None:
@@ -217,35 +259,51 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                             if val:
                                 zones = list(val)
                                 break
-                        tasks.append({
-                            "id":    task_id,
-                            "name":  task_name,
-                            "zones": zones,
-                        })
+                        tasks.append({"id": task_id, "name": task_name, "zones": zones})
             except Exception:
                 pass
 
-            # Attempt 2: report_data.dev.toapp_multi_mow_tasks
+            # Attempt 2: report_data.dev.toapp_multi_mow_tasks / toapp_multi_mow_tasks_ack
             if not tasks:
                 try:
                     report = getattr(mower, "report_data", None)
                     dev    = getattr(report, "dev", None) if report else None
-                    multi  = getattr(dev, "toapp_multi_mow_tasks", None) if dev else None
-                    if multi:
-                        task_list = getattr(multi, "mow_task_list", []) or []
-                        for idx, t in enumerate(task_list):
-                            task_id   = getattr(t, "task_id", idx)
-                            task_name = getattr(t, "task_name", "Aufgabe {}".format(idx + 1))
-                            zones = list(getattr(t, "zone_hashs", []) or [])
-                            tasks.append({
-                                "id":    task_id,
-                                "name":  task_name,
-                                "zones": zones,
-                            })
+                    for attr_name in ("toapp_multi_mow_tasks", "toapp_multi_mow_tasks_ack"):
+                        multi = getattr(dev, attr_name, None) if dev else None
+                        if multi:
+                            task_list = getattr(multi, "mow_task_list", []) or []
+                            for idx, t in enumerate(task_list):
+                                task_id   = getattr(t, "task_id", idx)
+                                task_name = getattr(t, "task_name", "Aufgabe {}".format(idx + 1))
+                                zones = list(getattr(t, "zone_hashs", []) or [])
+                                tasks.append({"id": task_id, "name": task_name, "zones": zones})
+                            if tasks:
+                                break
                 except Exception:
                     pass
 
-            return {"ok": True, "action": "get_tasks", "tasks": tasks}
+            # Debug: if still empty, collect mower attribute structure for diagnosis
+            debug_info = {}
+            if not tasks:
+                try:
+                    for attr in sorted(dir(mower)):
+                        if attr.startswith('_'):
+                            continue
+                        try:
+                            val = getattr(mower, attr)
+                            if not callable(val):
+                                debug_info[attr] = repr(val)[:200]
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            return {
+                "ok": True,
+                "action": "get_tasks",
+                "tasks": tasks,
+                "debug": debug_info if debug_info else None,
+            }
 
         elif action == "start_task":
             if not extra_params:

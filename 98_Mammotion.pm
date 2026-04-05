@@ -641,6 +641,15 @@ sub Mammotion_PythonDone {
         my @tasks = @{$json_data->{tasks} // []};
         Log3($name, 3, "[$name] " . scalar(@tasks) . " Aufgaben gefunden.");
 
+        # Debug-Info loggen wenn vorhanden
+        if (defined $json_data->{debug} && ref($json_data->{debug}) eq 'HASH') {
+            my $debug = $json_data->{debug};
+            Log3($name, 3, "[$name] DEBUG mower-Attribute: " . join(", ", keys %$debug));
+            for my $k (sort keys %$debug) {
+                Log3($name, 4, "[$name] DEBUG $k = $debug->{$k}");
+            }
+        }
+
         readingsBeginUpdate($hash);
         readingsBulkUpdate($hash, "tasks_json",  encode_json(\@tasks));
         readingsBulkUpdate($hash, "tasks_count", scalar @tasks);
