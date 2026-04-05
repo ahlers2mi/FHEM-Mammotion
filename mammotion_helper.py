@@ -196,11 +196,11 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             return {"ok": True, "action": "start_zone", "zone_hash": zone_hash}
 
         elif action == "get_tasks":
-            # Tasks are part of map data – trigger map sync first
+            # Tasks (Plans) are part of map data - start map sync
             await mammotion.start_map_sync(device_name)
 
-            # Wait until task data is stable (all MQTT packets received)
-            wait_max = 60
+            # Wait until plan data stabilizes (same pattern as get_zones)
+            wait_max = 90
             wait_step = 3
             waited = 0
             stable_count = 0
@@ -216,20 +216,12 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                     last_task_count = -1
                     continue
 
-                # Try all known attribute paths for task count
                 current_count = 0
-                for path in [
-                    lambda m: len(getattr(getattr(m, "job", None), "job_list", []) or []),
-                    lambda m: len(getattr(getattr(m, "job", None), "jobs", []) or []),
-                    lambda m: len(getattr(getattr(getattr(m, "report_data", None), "dev", None), "toapp_multi_mow_tasks_ack", []) or []),
-                ]:
-                    try:
-                        cnt = path(mower)
-                        if cnt > 0:
-                            current_count = cnt
-                            break
-                    except Exception:
-                        pass
+                try:
+                    plan_map = mower.map.plan if (hasattr(mower, "map") and hasattr(mower.map, "plan")) else {}
+                    current_count = len(plan_map)
+                except Exception:
+                    pass
 
                 if current_count > 0 and current_count == last_task_count:
                     stable_count += 1
@@ -244,66 +236,20 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 return {"ok": False, "error": "Device state not available"}
 
             tasks = []
+            plan_map = mower.map.plan if (hasattr(mower, "map") and hasattr(mower.map, "plan")) else {}
 
-            # Attempt 1: mower.job.job_list / mower.job.jobs
-            try:
-                job_obj = getattr(mower, "job", None)
-                if job_obj is not None:
-                    job_list = getattr(job_obj, "job_list", None) or getattr(job_obj, "jobs", None) or []
-                    for idx, job in enumerate(job_list):
-                        task_id   = getattr(job, "id", None) or getattr(job, "task_id", idx)
-                        task_name = getattr(job, "name", None) or getattr(job, "task_name", "Aufgabe {}".format(idx + 1))
-                        zones = []
-                        for attr in ("one_hashs", "zone_hashs", "hashs", "areas"):
-                            val = getattr(job, attr, None)
-                            if val:
-                                zones = list(val)
-                                break
-                        tasks.append({"id": task_id, "name": task_name, "zones": zones})
-            except Exception:
-                pass
+            for idx, (plan_id, plan) in enumerate(plan_map.items()):
+                task_name = getattr(plan, "task_name", "") or getattr(plan, "job_name", "") or "Aufgabe {}".format(idx + 1)
+                task_id   = getattr(plan, "task_id", "") or getattr(plan, "job_id", "") or plan_id
+                zone_hashs = list(getattr(plan, "zone_hashs", []) or [])
+                tasks.append({
+                    "id":      task_id,
+                    "name":    task_name,
+                    "zones":   zone_hashs,
+                    "plan_id": plan_id,
+                })
 
-            # Attempt 2: report_data.dev.toapp_multi_mow_tasks / toapp_multi_mow_tasks_ack
-            if not tasks:
-                try:
-                    report = getattr(mower, "report_data", None)
-                    dev    = getattr(report, "dev", None) if report else None
-                    for attr_name in ("toapp_multi_mow_tasks", "toapp_multi_mow_tasks_ack"):
-                        multi = getattr(dev, attr_name, None) if dev else None
-                        if multi:
-                            task_list = getattr(multi, "mow_task_list", []) or []
-                            for idx, t in enumerate(task_list):
-                                task_id   = getattr(t, "task_id", idx)
-                                task_name = getattr(t, "task_name", "Aufgabe {}".format(idx + 1))
-                                zones = list(getattr(t, "zone_hashs", []) or [])
-                                tasks.append({"id": task_id, "name": task_name, "zones": zones})
-                            if tasks:
-                                break
-                except Exception:
-                    pass
-
-            # Debug: if still empty, collect mower attribute structure for diagnosis
-            debug_info = {}
-            if not tasks:
-                try:
-                    for attr in sorted(dir(mower)):
-                        if attr.startswith('_'):
-                            continue
-                        try:
-                            val = getattr(mower, attr)
-                            if not callable(val):
-                                debug_info[attr] = repr(val)[:200]
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            return {
-                "ok": True,
-                "action": "get_tasks",
-                "tasks": tasks,
-                "debug": debug_info if debug_info else None,
-            }
+            return {"ok": True, "action": "get_tasks", "tasks": tasks}
 
         elif action == "start_task":
             if not extra_params:
@@ -316,24 +262,17 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             mower = mammotion.mower(device_name)
             zone_hashes = []
 
-            # Try to read zone hashes from the task
             try:
-                job_obj  = getattr(mower, "job", None)
-                job_list = (getattr(job_obj, "job_list", None) or getattr(job_obj, "jobs", None) or []) if job_obj else []
-                for job in job_list:
-                    jid = str(getattr(job, "id", None) or getattr(job, "task_id", ""))
-                    if jid == str(task_id_input):
-                        for attr in ("one_hashs", "zone_hashs", "hashs", "areas"):
-                            val = getattr(job, attr, None)
-                            if val:
-                                zone_hashes = [int(h) for h in val]
-                                break
+                plan_map = mower.map.plan if (mower and hasattr(mower, "map") and hasattr(mower.map, "plan")) else {}
+                for plan_id, plan in plan_map.items():
+                    pid = getattr(plan, "task_id", "") or getattr(plan, "job_id", "") or plan_id
+                    if str(pid) == str(task_id_input) or str(plan_id) == str(task_id_input):
+                        zone_hashes = [int(h) for h in (getattr(plan, "zone_hashs", []) or [])]
                         break
             except Exception:
                 pass
 
             if not zone_hashes:
-                # Fallback: interpret task_id directly as zone_hash
                 zone_hashes = [int(task_id_input)]
 
             route_info = GenerateRouteInformation(
