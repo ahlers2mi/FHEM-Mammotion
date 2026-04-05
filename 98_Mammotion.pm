@@ -373,7 +373,7 @@ sub Mammotion_SendCommand {
     my $arg = join("\x1F", $name, $hash->{ACCOUNT}, $hash->{PASSWORD},
                    $py, $script, $action, $deviceName, $iotId, @extra);
 
-    my $timeout = ($action =~ /^(get_zones|start_zone)$/) ? 120 : 90;
+    my $timeout = ($action =~ /^(get_zones|start_zone)$/) ? 180 : 90;
 
     $hash->{helper} = BlockingCall(
         "Mammotion_PythonCall",

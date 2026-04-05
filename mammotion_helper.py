@@ -102,7 +102,20 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
 
         elif action == "get_zones":
             await mammotion.start_map_sync(device_name)
-            await asyncio.sleep(5)
+
+            # Actively wait until map data arrives (max. 90 seconds)
+            wait_max = 90
+            wait_step = 3
+            waited = 0
+            while waited < wait_max:
+                await asyncio.sleep(wait_step)
+                waited += wait_step
+                mower = mammotion.mower(device_name)
+                if mower is None:
+                    continue
+                area_map = mower.map.area if hasattr(mower.map, "area") else {}
+                if area_map:
+                    break  # Data has arrived, exit the loop
 
             mower = mammotion.mower(device_name)
             if mower is None:
