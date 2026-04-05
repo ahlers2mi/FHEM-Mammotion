@@ -17,6 +17,8 @@ Aktionen (MQTT):
   get_zones        <device_name> <iot_id>
   start_zone       <device_name> <iot_id> <zone_hash>
   get_status       <device_name> <iot_id>
+  get_tasks        <device_name> <iot_id>
+  start_task       <device_name> <iot_id> <task_id>
 """
 
 import sys
@@ -117,19 +119,31 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
         elif action == "get_zones":
             await mammotion.start_map_sync(device_name)
 
-            # Actively wait until map data arrives (max. 90 seconds)
+            # Wait until zone count is stable (all MQTT packets received)
             wait_max = 90
             wait_step = 3
             waited = 0
+            stable_count = 0
+            stable_needed = 3
+            last_zone_count = -1
+
             while waited < wait_max:
                 await asyncio.sleep(wait_step)
                 waited += wait_step
                 mower = mammotion.mower(device_name)
                 if mower is None:
+                    stable_count = 0
+                    last_zone_count = -1
                     continue
                 area_map = mower.map.area if hasattr(mower.map, "area") else {}
-                if area_map:
-                    break  # Data has arrived, exit the loop
+                current_count = len(area_map)
+                if current_count > 0 and current_count == last_zone_count:
+                    stable_count += 1
+                    if stable_count >= stable_needed:
+                        break
+                else:
+                    stable_count = 0
+                last_zone_count = current_count
 
             mower = mammotion.mower(device_name)
             if mower is None:
@@ -181,6 +195,112 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             await mammotion.send_command(device_name, "start_job")
             return {"ok": True, "action": "start_zone", "zone_hash": zone_hash}
 
+        elif action == "get_tasks":
+            # Try to read tasks from mower.job or mower.report_data
+            mower = mammotion.mower(device_name)
+            if mower is None:
+                return {"ok": False, "error": "Device state not available"}
+
+            tasks = []
+
+            # Attempt 1: mower.job (pymammotion JobList)
+            try:
+                job_obj = getattr(mower, "job", None)
+                if job_obj is not None:
+                    job_list = getattr(job_obj, "job_list", None) or getattr(job_obj, "jobs", None) or []
+                    for idx, job in enumerate(job_list):
+                        task_id   = getattr(job, "id", None) or getattr(job, "task_id", idx)
+                        task_name = getattr(job, "name", None) or getattr(job, "task_name", "Aufgabe {}".format(idx + 1))
+                        zones = []
+                        for attr in ("one_hashs", "zone_hashs", "hashs", "areas"):
+                            val = getattr(job, attr, None)
+                            if val:
+                                zones = list(val)
+                                break
+                        tasks.append({
+                            "id":    task_id,
+                            "name":  task_name,
+                            "zones": zones,
+                        })
+            except Exception:
+                pass
+
+            # Attempt 2: report_data.dev.toapp_multi_mow_tasks
+            if not tasks:
+                try:
+                    report = getattr(mower, "report_data", None)
+                    dev    = getattr(report, "dev", None) if report else None
+                    multi  = getattr(dev, "toapp_multi_mow_tasks", None) if dev else None
+                    if multi:
+                        task_list = getattr(multi, "mow_task_list", []) or []
+                        for idx, t in enumerate(task_list):
+                            task_id   = getattr(t, "task_id", idx)
+                            task_name = getattr(t, "task_name", "Aufgabe {}".format(idx + 1))
+                            zones = list(getattr(t, "zone_hashs", []) or [])
+                            tasks.append({
+                                "id":    task_id,
+                                "name":  task_name,
+                                "zones": zones,
+                            })
+                except Exception:
+                    pass
+
+            return {"ok": True, "action": "get_tasks", "tasks": tasks}
+
+        elif action == "start_task":
+            if not extra_params:
+                return {"ok": False, "error": "task_id parameter required"}
+            task_id_input = extra_params[0]
+
+            from pymammotion.data.model import GenerateRouteInformation
+            from pymammotion.data.model.enums import JobMode, MowOrder
+
+            mower = mammotion.mower(device_name)
+            zone_hashes = []
+
+            # Try to read zone hashes from the task
+            try:
+                job_obj  = getattr(mower, "job", None)
+                job_list = (getattr(job_obj, "job_list", None) or getattr(job_obj, "jobs", None) or []) if job_obj else []
+                for job in job_list:
+                    jid = str(getattr(job, "id", None) or getattr(job, "task_id", ""))
+                    if jid == str(task_id_input):
+                        for attr in ("one_hashs", "zone_hashs", "hashs", "areas"):
+                            val = getattr(job, attr, None)
+                            if val:
+                                zone_hashes = [int(h) for h in val]
+                                break
+                        break
+            except Exception:
+                pass
+
+            if not zone_hashes:
+                # Fallback: interpret task_id directly as zone_hash
+                zone_hashes = [int(task_id_input)]
+
+            route_info = GenerateRouteInformation(
+                one_hashs=zone_hashes,
+                job_mode=JobMode.NORMAL,
+                edge_mode=1,
+                blade_height=40,
+                speed=1.0,
+                ultra_wave=1,
+                channel_width=220,
+                channel_mode=0,
+                toward=0,
+                toward_included_angle=0,
+                toward_mode=0,
+                path_order=MowOrder.LEFT_RIGHT if hasattr(MowOrder, "LEFT_RIGHT") else 0,
+            )
+
+            await mammotion.send_command_with_args(
+                device_name, "generate_route_information",
+                generate_route_information=route_info
+            )
+            await asyncio.sleep(2)
+            await mammotion.send_command(device_name, "start_job")
+            return {"ok": True, "action": "start_task", "task_id": task_id_input, "zones": zone_hashes}
+
         elif action == "get_status":
             mower = mammotion.mower(device_name)
             if mower is None:
@@ -221,7 +341,7 @@ async def run(account, password, action, params):
     mqtt_actions = {
         "start_mowing", "stop_mowing", "pause_mowing", "resume_mowing",
         "return_home", "leave_dock", "along_border",
-        "get_zones", "start_zone", "get_status"
+        "get_zones", "start_zone", "get_status", "get_tasks", "start_task"
     }
 
     if action in mqtt_actions:

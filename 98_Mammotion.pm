@@ -35,12 +35,14 @@ my %sets = (
     "leave_dock"   => "noArg",
     "along_border" => "noArg",
     "start_zone"   => "textField",
+    "start_task"   => "textField",
     "selectDevice" => "textField",
 );
 
 my %gets = (
     "devices" => "noArg",
     "zones"   => "noArg",
+    "tasks"   => "noArg",
     "status"  => "noArg",
 );
 
@@ -105,21 +107,47 @@ sub Mammotion_Undef {
     return undef;
 }
 
+sub Mammotion_BuildSetList {
+    my ($hash) = @_;
+    my $name = $hash->{NAME};
+    my %dynamic_sets = %sets;
+
+    # Zones as dropdown for start_zone
+    my $zones_json = ReadingsVal($name, "zones_json", "");
+    if ($zones_json) {
+        my $zones;
+        eval { $zones = decode_json($zones_json) };
+        if ($zones && @$zones) {
+            my $zone_options = join(",", map { my $n = $_->{name}; $n =~ s/[ ,]/_/g; $n } @$zones);
+            $dynamic_sets{"start_zone"} = $zone_options if $zone_options;
+        }
+    }
+
+    # Tasks as dropdown for start_task
+    my $tasks_json = ReadingsVal($name, "tasks_json", "");
+    if ($tasks_json) {
+        my $tasks;
+        eval { $tasks = decode_json($tasks_json) };
+        if ($tasks && @$tasks) {
+            my $task_options = join(",", map { my $n = $_->{name}; $n =~ s/[ ,]/_/g; $n } @$tasks);
+            $dynamic_sets{"start_task"} = $task_options if $task_options;
+        }
+    }
+
+    return join(" ", map {
+        $dynamic_sets{$_} eq "noArg" ? $_ : "$_:$dynamic_sets{$_}"
+    } sort keys %dynamic_sets);
+}
+
 sub Mammotion_Set {
     my ($hash, $name, $cmd, @args) = @_;
 
     if ($cmd eq "?") {
-        my $list = join(" ", map {
-            $sets{$_} eq "noArg" ? $_ : "$_:$_"
-        } sort keys %sets);
-        return "Unknown argument $cmd, choose one of $list";
+        return "Unknown argument $cmd, choose one of " . Mammotion_BuildSetList($hash);
     }
 
     if (!exists($sets{$cmd})) {
-        my $list = join(" ", map {
-            $sets{$_} eq "noArg" ? $_ : "$_:$_"
-        } sort keys %sets);
-        return "Unknown argument $cmd, choose one of $list";
+        return "Unknown argument $cmd, choose one of " . Mammotion_BuildSetList($hash);
     }
 
     if ($cmd eq "update") {
@@ -158,15 +186,74 @@ sub Mammotion_Set {
                 my $zones;
                 eval { $zones = decode_json($zones_json) };
                 if ($zones && @$zones) {
-                    return "Bitte Zone-Hash angeben: set $name start_zone <hash>\nVerfuegbare Zonen: " .
-                           join(", ", map { "$\_->{name} (Hash: $_->{hash})" } @$zones);
+                    return "Bitte Zone-Hash oder Name angeben: set $name start_zone <hash_oder_name>\nVerfuegbare Zonen: " .
+                           join(", ", map { "$_->{name} (Hash: $_->{hash})" } @$zones);
                 }
             }
-            return "Bitte Zone-Hash angeben: set $name start_zone <hash>. Erst 'get $name zones' ausfuehren.";
+            return "Bitte Zone-Hash oder Name angeben: set $name start_zone <hash_oder_name>. Erst 'get $name zones' ausfuehren.";
         }
-        my $zone_hash = $args[0];
-        Log3($name, 3, "[$name] Starte Zone: $zone_hash");
+        my $zone_input = join(" ", @args);
+        my $zone_hash  = $zone_input;
+
+        # If not a pure integer: try to resolve by name
+        if ($zone_input !~ /^\d+$/) {
+            my $zones_json = ReadingsVal($name, "zones_json", "");
+            if ($zones_json) {
+                my $zones;
+                eval { $zones = decode_json($zones_json) };
+                if ($zones && @$zones) {
+                    my ($found) = grep { lc($_->{name}) eq lc($zone_input) } @$zones;
+                    if ($found) {
+                        $zone_hash = $found->{hash};
+                    } else {
+                        my $available = join(", ", map { "$_->{name} (Hash: $_->{hash})" } @$zones);
+                        return "Zone '$zone_input' nicht gefunden. Verfuegbare Zonen: $available";
+                    }
+                }
+            }
+        }
+
+        Log3($name, 3, "[$name] Starte Zone: $zone_hash (Eingabe: $zone_input)");
         Mammotion_SendCommand($hash, "start_zone", $deviceName, $iotId, $zone_hash);
+        return undef;
+    }
+
+    if ($cmd eq "start_task") {
+        if (!@args) {
+            my $tasks_json = ReadingsVal($name, "tasks_json", "");
+            if ($tasks_json) {
+                my $tasks;
+                eval { $tasks = decode_json($tasks_json) };
+                if ($tasks && @$tasks) {
+                    return "Bitte Task-ID oder Name angeben: set $name start_task <id_oder_name>\nVerfuegbare Aufgaben: " .
+                           join(", ", map { "$_->{name} (ID: $_->{id})" } @$tasks);
+                }
+            }
+            return "Bitte Task-ID angeben: set $name start_task <id>. Erst 'get $name tasks' ausfuehren.";
+        }
+        my $task_input = join(" ", @args);
+        my $task_id    = $task_input;
+
+        # If not a pure integer: try to resolve by name
+        if ($task_input !~ /^\d+$/) {
+            my $tasks_json = ReadingsVal($name, "tasks_json", "");
+            if ($tasks_json) {
+                my $tasks;
+                eval { $tasks = decode_json($tasks_json) };
+                if ($tasks && @$tasks) {
+                    my ($found) = grep { lc($_->{name}) eq lc($task_input) } @$tasks;
+                    if ($found) {
+                        $task_id = $found->{id};
+                    } else {
+                        my $available = join(", ", map { "$_->{name} (ID: $_->{id})" } @$tasks);
+                        return "Aufgabe '$task_input' nicht gefunden. Verfuegbare Aufgaben: $available";
+                    }
+                }
+            }
+        }
+
+        Log3($name, 3, "[$name] Starte Aufgabe: $task_id (Eingabe: $task_input)");
+        Mammotion_SendCommand($hash, "start_task", $deviceName, $iotId, $task_id);
         return undef;
     }
 
@@ -243,6 +330,17 @@ sub Mammotion_Get {
         return "Zonen werden abgefragt, bitte kurz warten...";
     }
 
+    if ($cmd eq "tasks") {
+        my $deviceName = $hash->{DEVICE_NAME};
+        my $iotId      = $hash->{IOT_ID} // ReadingsVal($name, "iot_id", "");
+        if (!$deviceName || !$iotId) {
+            return "Kein Geraet. Bitte erst: set $name update";
+        }
+        Log3($name, 3, "[$name] Aufgaben-Abfrage gestartet...");
+        Mammotion_SendCommand($hash, "get_tasks", $deviceName, $iotId);
+        return "Aufgaben werden abgefragt, bitte kurz warten...";
+    }
+
     if ($cmd eq "status") {
         my $state    = ReadingsVal($name, "state",        "unbekannt");
         my $devname  = ReadingsVal($name, "device_name",  "unbekannt");
@@ -278,6 +376,21 @@ sub Mammotion_Get {
                     $out .= sprintf("    Hash: %-12s  Name: %s\n",
                         $z->{hash} // "?",
                         $z->{name} // "unbekannt"
+                    );
+                }
+            }
+        }
+
+        my $tasks_json = ReadingsVal($name, "tasks_json", "");
+        if ($tasks_json) {
+            my $tasks;
+            eval { $tasks = decode_json($tasks_json) };
+            if ($tasks && @$tasks) {
+                $out .= "\n  Verfuegbare Aufgaben (" . scalar(@$tasks) . "):\n";
+                for my $t (@$tasks) {
+                    $out .= sprintf("    ID: %-6s  Name: %s\n",
+                        $t->{id}   // "?",
+                        $t->{name} // "unbekannt"
                     );
                 }
             }
@@ -373,7 +486,7 @@ sub Mammotion_SendCommand {
     my $arg = join("\x1F", $name, $hash->{ACCOUNT}, $hash->{PASSWORD},
                    $py, $script, $action, $deviceName, $iotId, @extra);
 
-    my $timeout = ($action =~ /^(get_zones|start_zone)$/) ? 180 : 90;
+    my $timeout = ($action =~ /^(get_zones|start_zone|get_tasks|start_task)$/) ? 180 : 90;
 
     $hash->{helper} = BlockingCall(
         "Mammotion_PythonCall",
@@ -524,7 +637,32 @@ sub Mammotion_PythonDone {
         return;
     }
 
-    if ($action =~ /^(start_mowing|stop_mowing|pause_mowing|resume_mowing|return_home|leave_dock|along_border|start_zone)$/) {
+    if ($action eq "get_tasks") {
+        my @tasks = @{$json_data->{tasks} // []};
+        Log3($name, 3, "[$name] " . scalar(@tasks) . " Aufgaben gefunden.");
+
+        readingsBeginUpdate($hash);
+        readingsBulkUpdate($hash, "tasks_json",  encode_json(\@tasks));
+        readingsBulkUpdate($hash, "tasks_count", scalar @tasks);
+        readingsBulkUpdate($hash, "last_update", $timestamp);
+        readingsBulkUpdate($hash, "last_error",  "");
+
+        my $i = 0;
+        for my $t (@tasks) {
+            readingsBulkUpdate($hash, "task_${i}_id",   $t->{id}   // "");
+            readingsBulkUpdate($hash, "task_${i}_name",  $t->{name} // "");
+            $i++;
+        }
+        readingsBulkUpdate($hash, "state", "online");
+        readingsEndUpdate($hash, 1);
+
+        for my $t (@tasks) {
+            Log3($name, 3, "[$name] Aufgabe: $t->{name} (ID: $t->{id})");
+        }
+        return;
+    }
+
+    if ($action =~ /^(start_mowing|stop_mowing|pause_mowing|resume_mowing|return_home|leave_dock|along_border|start_zone|start_task)$/) {
         Log3($name, 3, "[$name] Befehl erfolgreich: $action");
         my %state_map = (
             "start_mowing"  => "mowing",
@@ -535,6 +673,7 @@ sub Mammotion_PythonDone {
             "leave_dock"    => "online",
             "along_border"  => "border_mode",
             "start_zone"    => "mowing",
+            "start_task"    => "mowing",
         );
         readingsBeginUpdate($hash);
         readingsBulkUpdate($hash, "last_command", $action);
@@ -662,7 +801,8 @@ sub Mammotion_PythonTimeout {
     <li><code>return_home</code> - Zur Ladestation</li>
     <li><code>leave_dock</code> - Ladestation verlassen</li>
     <li><code>along_border</code> - Randmodus</li>
-    <li><code>start_zone &lt;hash&gt;</code> - Bestimmte Zone maehen</li>
+    <li><code>start_zone &lt;hash_oder_name&gt;</code> - Bestimmte Zone maehen (Hash oder Name)</li>
+    <li><code>start_task &lt;id_oder_name&gt;</code> - Bestimmte Aufgabe starten (ID oder Name)</li>
     <li><code>selectDevice &lt;name&gt;</code> - Geraet waehlen</li>
   </ul><br>
 
@@ -670,13 +810,20 @@ sub Mammotion_PythonTimeout {
   <ul>
     <li><code>devices</code> - Alle Geraete</li>
     <li><code>zones</code> - Verfuegbare Maehzonen abrufen</li>
-    <li><code>status</code> - Status inkl. Zonen</li>
+    <li><code>tasks</code> - Verfuegbare Aufgaben abrufen</li>
+    <li><code>status</code> - Status inkl. Zonen und Aufgaben</li>
   </ul><br>
 
   <b>Workflow Zonen-Maehen:</b><br>
   <ul>
     <li>1. <code>get &lt;name&gt; zones</code> - Zonen laden</li>
-    <li>2. <code>set &lt;name&gt; start_zone &lt;hash&gt;</code> - Zone starten</li>
+    <li>2. <code>set &lt;name&gt; start_zone &lt;hash_oder_name&gt;</code> - Zone starten</li>
+  </ul>
+
+  <b>Workflow Aufgaben:</b><br>
+  <ul>
+    <li>1. <code>get &lt;name&gt; tasks</code> - Aufgaben laden</li>
+    <li>2. <code>set &lt;name&gt; start_task &lt;id_oder_name&gt;</code> - Aufgabe starten</li>
   </ul>
 </ul>
 
