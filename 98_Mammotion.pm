@@ -427,7 +427,9 @@ sub Mammotion_PythonCall {
 
     if ($exit_code != 0) {
         $stdout_content =~ s/'//g;
+        $stdout_content =~ s/"//g;
         $stderr_content =~ s/'//g;
+        $stderr_content =~ s/"//g;
         return "$name|ERROR|Exit-Code $exit_code: $stdout_content";
     }
 
