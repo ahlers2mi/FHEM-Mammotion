@@ -136,8 +136,10 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 return {"ok": False, "error": "Device state not available"}
 
             zones = []
-            area_map  = mower.map.area       if hasattr(mower.map, "area")       else {}
-            name_map  = mower.map.area_name  if hasattr(mower.map, "area_name")  else {}
+            area_map       = mower.map.area      if hasattr(mower.map, "area")      else {}
+            area_name_list = mower.map.area_name if hasattr(mower.map, "area_name") else []
+            # area_name ist list[AreaHashNameList(name, hash)] — zu dict konvertieren
+            name_map = {item.hash: item.name for item in area_name_list}
 
             for hash_id, area_data in area_map.items():
                 zone_name = name_map.get(hash_id, "Zone {}".format(hash_id))
