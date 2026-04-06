@@ -168,11 +168,10 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             zone_hash = int(extra_params[0])
 
             from pymammotion.data.model import GenerateRouteInformation
-            from pymammotion.data.model.enums import JobMode, MowOrder
 
             route_info = GenerateRouteInformation(
                 one_hashs=[zone_hash],
-                job_mode=JobMode.NORMAL,
+                job_mode=3,
                 edge_mode=1,
                 blade_height=40,
                 speed=1.0,
@@ -182,7 +181,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 toward=0,
                 toward_included_angle=0,
                 toward_mode=0,
-                path_order=MowOrder.LEFT_RIGHT if hasattr(MowOrder, "LEFT_RIGHT") else 0,
+                path_order="",
             )
 
             await mammotion.send_command_with_args(
