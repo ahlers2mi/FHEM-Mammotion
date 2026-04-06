@@ -24,6 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
+my $MODULE_VERSION = "1.3.0";
 
 my %sets = (
     "update"       => "noArg",
@@ -58,6 +59,7 @@ sub Mammotion_Initialize {
                       . "python_bin "
                       . "helper_script "
                       . $readingFnAttributes;
+    $hash->{MODULE_VERSION} = $MODULE_VERSION;
 
     foreach my $d (keys %defs) {
         if (defined($defs{$d}{TYPE}) && $defs{$d}{TYPE} eq "Mammotion") {
@@ -88,6 +90,7 @@ sub Mammotion_Define {
     $hash->{DEVICE_NAME} = $deviceName;
     $hash->{IOT_ID}      = "";
     $hash->{STATE}       = "initialized";
+    $hash->{MODULE_VERSION} = $MODULE_VERSION;
     $hash->{INTERVAL}    = AttrVal($name, "interval", 300);
     $hash->{RUNNING}     = 0;
 
@@ -515,8 +518,10 @@ sub Mammotion_PythonCall {
     my ($stdout_content, $stderr_content) = ("", "");
 
     eval {
-        my $pid = open3(my $stdin, my $stdout, $stderr_fh,
-                        $py, $script, $account, $password, $action, @params);
+        my @cmd = ($py, $script, $account, $password, $action, @params);
+        my $fhem_verbose = AttrVal($name, "verbose", 3);
+        push @cmd, "-v" if $fhem_verbose >= 5;
+        my $pid = open3(my $stdin, my $stdout, $stderr_fh, @cmd);
         close($stdin);
 
         while (my $line = <$stdout>) {

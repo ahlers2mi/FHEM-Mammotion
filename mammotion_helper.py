@@ -26,8 +26,6 @@ import json
 import asyncio
 import logging
 
-logging.basicConfig(level=logging.WARNING)
-
 
 async def get_devices(http):
     resp = await http.get_user_device_list()
@@ -196,50 +194,35 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             return {"ok": True, "action": "start_zone", "zone_hash": zone_hash}
 
         elif action == "get_tasks":
-            # Tasks (Plans) are part of map data - start map sync
-            await mammotion.start_map_sync(device_name)
+            # Plans/Tasks need start_schedule_sync, not start_map_sync
+            await mammotion.start_schedule_sync(device_name)
 
-            # Wait until plan data stabilizes (same pattern as get_zones)
+            # Wait until all plans have arrived (plan count == total_plan_num)
             wait_max = 90
             wait_step = 3
             waited = 0
-            stable_count = 0
-            stable_needed = 2
-            last_task_count = -1
 
             while waited < wait_max:
                 await asyncio.sleep(wait_step)
                 waited += wait_step
                 mower = mammotion.mower(device_name)
                 if mower is None:
-                    stable_count = 0
-                    last_task_count = -1
                     continue
-
-                current_count = 0
-                try:
-                    plan_map = mower.map.plan if (hasattr(mower, "map") and hasattr(mower.map, "plan")) else {}
-                    current_count = len(plan_map)
-                except Exception:
-                    pass
-
-                if current_count > 0 and current_count == last_task_count:
-                    stable_count += 1
-                    if stable_count >= stable_needed:
-                        break
-                else:
-                    stable_count = 0
-                last_task_count = current_count
+                plan_map = getattr(getattr(mower, "map", None), "plan", {}) or {}
+                if plan_map:
+                    sample = next(iter(plan_map.values()))
+                    total = getattr(sample, "total_plan_num", 0)
+                    if total > 0 and len(plan_map) >= total:
+                        break  # all plans received
 
             mower = mammotion.mower(device_name)
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
+            plan_map = getattr(getattr(mower, "map", None), "plan", {}) or {}
             tasks = []
-            plan_map = mower.map.plan if (hasattr(mower, "map") and hasattr(mower.map, "plan")) else {}
-
-            for idx, (plan_id, plan) in enumerate(plan_map.items()):
-                task_name = getattr(plan, "task_name", "") or getattr(plan, "job_name", "") or "Aufgabe {}".format(idx + 1)
+            for plan_id, plan in plan_map.items():
+                task_name = getattr(plan, "task_name", "") or getattr(plan, "job_name", "") or "Aufgabe {}".format(len(tasks) + 1)
                 task_id   = getattr(plan, "task_id", "") or getattr(plan, "job_id", "") or plan_id
                 zone_hashs = list(getattr(plan, "zone_hashs", []) or [])
                 tasks.append({
@@ -256,47 +239,24 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 return {"ok": False, "error": "task_id parameter required"}
             task_id_input = extra_params[0]
 
-            from pymammotion.data.model import GenerateRouteInformation
-            from pymammotion.data.model.enums import JobMode, MowOrder
-
             mower = mammotion.mower(device_name)
-            zone_hashes = []
+            plan_id_to_use = task_id_input
 
             try:
-                plan_map = mower.map.plan if (mower and hasattr(mower, "map") and hasattr(mower.map, "plan")) else {}
-                for plan_id, plan in plan_map.items():
-                    pid = getattr(plan, "task_id", "") or getattr(plan, "job_id", "") or plan_id
-                    if str(pid) == str(task_id_input) or str(plan_id) == str(task_id_input):
-                        zone_hashes = [int(h) for h in (getattr(plan, "zone_hashs", []) or [])]
+                plan_map = getattr(getattr(mower, "map", None), "plan", {}) or {}
+                for pid, plan in plan_map.items():
+                    t_id = getattr(plan, "task_id", "") or getattr(plan, "job_id", "") or pid
+                    if str(t_id) == str(task_id_input) or str(pid) == str(task_id_input):
+                        plan_id_to_use = pid
                         break
             except Exception:
                 pass
 
-            if not zone_hashes:
-                zone_hashes = [int(task_id_input)]
-
-            route_info = GenerateRouteInformation(
-                one_hashs=zone_hashes,
-                job_mode=JobMode.NORMAL,
-                edge_mode=1,
-                blade_height=40,
-                speed=1.0,
-                ultra_wave=1,
-                channel_width=220,
-                channel_mode=0,
-                toward=0,
-                toward_included_angle=0,
-                toward_mode=0,
-                path_order=MowOrder.LEFT_RIGHT if hasattr(MowOrder, "LEFT_RIGHT") else 0,
-            )
-
             await mammotion.send_command_with_args(
-                device_name, "generate_route_information",
-                generate_route_information=route_info
+                device_name, "single_schedule",
+                plan_id=plan_id_to_use
             )
-            await asyncio.sleep(2)
-            await mammotion.send_command(device_name, "start_job")
-            return {"ok": True, "action": "start_task", "task_id": task_id_input, "zones": zone_hashes}
+            return {"ok": True, "action": "start_task", "task_id": task_id_input, "plan_id": plan_id_to_use}
 
         elif action == "get_status":
             mower = mammotion.mower(device_name)
@@ -364,17 +324,23 @@ async def run(account, password, action, params):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print(json.dumps({
-            "ok":    False,
-            "error": "Usage: mammotion_helper.py <account> <password> <action> [params...]"
-        }))
+    argv = sys.argv[1:]
+    verbose = "-v" in argv or "--verbose" in argv
+    argv = [a for a in argv if a not in ("-v", "--verbose")]
+
+    if verbose:
+        logging.basicConfig(level=logging.DEBUG, force=True)
+    else:
+        logging.basicConfig(level=logging.WARNING)
+
+    if len(argv) < 3:
+        print(json.dumps({"ok": False, "error": "Usage: mammotion_helper.py <account> <password> <action> [params...] [-v]"}))
         sys.exit(1)
 
-    account  = sys.argv[1]
-    password = sys.argv[2]
-    action   = sys.argv[3]
-    params   = sys.argv[4:] if len(sys.argv) > 4 else []
+    account  = argv[0]
+    password = argv[1]
+    action   = argv[2]
+    params   = argv[3:] if len(argv) > 3 else []
 
     try:
         result = asyncio.run(run(account, password, action, params))
