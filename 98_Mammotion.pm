@@ -228,35 +228,44 @@ sub Mammotion_Set {
                 my $tasks;
                 eval { $tasks = decode_json($tasks_json) };
                 if ($tasks && @$tasks) {
-                    return "Bitte Task-ID oder Name angeben: set $name start_task <id_oder_name>\nVerfuegbare Aufgaben: " .
-                           join(", ", map { "$_->{name} (ID: $_->{id})" } @$tasks);
+                    return "Bitte Task-Name angeben: set $name start_task <name>\nVerfuegbare Aufgaben: " .
+                           join(", ", map { "$_->{name}" } @$tasks);
                 }
             }
-            return "Bitte Task-ID angeben: set $name start_task <id>. Erst 'get $name tasks' ausfuehren.";
+            return "Bitte Task-Name angeben: set $name start_task <name>. Erst 'get $name tasks' ausfuehren.";
         }
         my $task_input = join(" ", @args);
-        my $task_id    = $task_input;
 
-        # If not a pure integer: try to resolve by name
-        if ($task_input !~ /^\d+$/) {
-            my $tasks_json = ReadingsVal($name, "tasks_json", "");
-            if ($tasks_json) {
-                my $tasks;
-                eval { $tasks = decode_json($tasks_json) };
-                if ($tasks && @$tasks) {
-                    my ($found) = grep { lc($_->{name}) eq lc($task_input) } @$tasks;
-                    if ($found) {
-                        $task_id = $found->{id};
-                    } else {
-                        my $available = join(", ", map { "$_->{name} (ID: $_->{id})" } @$tasks);
-                        return "Aufgabe '$task_input' nicht gefunden. Verfuegbare Aufgaben: $available";
+        # Look up plan_id from tasks_json (dropdown sends underscores instead of spaces)
+        my $plan_id_to_use;
+        my $tasks_json = ReadingsVal($name, "tasks_json", "");
+        if ($tasks_json) {
+            my $tasks;
+            eval { $tasks = decode_json($tasks_json) };
+            if ($tasks && @$tasks) {
+                for my $t (@$tasks) {
+                    my $tname = $t->{name} // "";
+                    (my $tname_norm = $tname) =~ s/[ ,]/_/g;
+                    if (   lc($tname_norm) eq lc($task_input)
+                        || lc($tname)      eq lc($task_input)
+                        || ($t->{id} // "") eq $task_input)
+                    {
+                        $plan_id_to_use = $t->{plan_id};
+                        last;
                     }
+                }
+                if (!$plan_id_to_use) {
+                    my $available = join(", ", map { $_->{name} } @$tasks);
+                    return "Aufgabe '$task_input' nicht gefunden. Verfuegbare Aufgaben: $available";
                 }
             }
         }
+        if (!$plan_id_to_use) {
+            return "Task '$task_input' nicht gefunden. Bitte erst 'get $name tasks' ausfuehren.";
+        }
 
-        Log3($name, 3, "[$name] Starte Aufgabe: $task_id (Eingabe: $task_input)");
-        Mammotion_SendCommand($hash, "start_task", $deviceName, $iotId, $task_id);
+        Log3($name, 3, "[$name] Starte Aufgabe: $task_input (plan_id: $plan_id_to_use)");
+        Mammotion_SendCommand($hash, "start_task", $deviceName, $iotId, $plan_id_to_use);
         return undef;
     }
 
@@ -489,7 +498,8 @@ sub Mammotion_SendCommand {
     my $arg = join("\x1F", $name, $hash->{ACCOUNT}, $hash->{PASSWORD},
                    $py, $script, $action, $deviceName, $iotId, @extra);
 
-    my $timeout = ($action =~ /^(get_zones|start_zone|get_tasks|start_task)$/) ? 180 : 90;
+    my $timeout = ($action =~ /^(get_zones|start_zone|get_tasks|start_task)$/) ? 180 :
+                  ($action eq "get_status") ? 60 : 90;
 
     $hash->{helper} = BlockingCall(
         "Mammotion_PythonCall",
@@ -699,15 +709,39 @@ sub Mammotion_PythonDone {
     }
 
     if ($action eq "get_status") {
-        readingsBeginUpdate($hash);
-        readingsBulkUpdate($hash, "battery",      $json_data->{battery}      // 0);
-        readingsBulkUpdate($hash, "work_state",   $json_data->{work_state}   // 0);
-        readingsBulkUpdate($hash, "charge_state", $json_data->{charge_state} // 0);
-        readingsBulkUpdate($hash, "last_update",  $timestamp);
-        readingsBulkUpdate($hash, "last_error",   "");
-        readingsEndUpdate($hash, 1);
+        Mammotion_ProcessStatus($hash, $json_data, $timestamp);
         return;
     }
+}
+
+sub Mammotion_ProcessStatus {
+    my ($hash, $data, $timestamp) = @_;
+    my $name = $hash->{NAME};
+
+    my $charge_state = $data->{charge_state} // 0;
+    my $battery      = $data->{battery}      // 0;
+    my $work_state   = $data->{work_state}   // 0;
+
+    my %charge_texts = (0 => "nicht laden", 1 => "laden", 2 => "voll");
+    my $charge_text  = $charge_texts{$charge_state} // "unbekannt ($charge_state)";
+
+    my %work_texts = (
+        0 => "idle", 1 => "mowing", 2 => "going_home",
+        3 => "charging", 4 => "emergency_stop", 5 => "paused",
+        6 => "park", 7 => "border"
+    );
+    my $work_text = $work_texts{$work_state} // "unbekannt ($work_state)";
+
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "battery",      $battery);
+    readingsBulkUpdate($hash, "charge_state", $charge_text);
+    readingsBulkUpdate($hash, "work_state",   $work_text);
+    readingsBulkUpdate($hash, "last_update",  $timestamp);
+    readingsBulkUpdate($hash, "last_error",   "");
+    readingsBulkUpdate($hash, "state",        "online");
+    readingsEndUpdate($hash, 1);
+
+    Log3($name, 4, "[$name] Status: Akku=$battery%, Arbeit=$work_text, Laden=$charge_text");
 }
 
 sub Mammotion_ProcessDevices {
@@ -770,6 +804,13 @@ sub Mammotion_ProcessDevices {
     readingsEndUpdate($hash, 1);
 
     Log3($name, 3, "[$name] Update OK. $i Geraet(e). Aktiv: ${\ $device->{device_name}} ($state_str) IoT-ID: ${\ $hash->{IOT_ID}};");
+
+    # Automatically fetch device status shortly after device update
+    my $devName = $hash->{DEVICE_NAME} // $device->{device_name};
+    my $iotId   = $hash->{IOT_ID};
+    InternalTimer(gettimeofday() + 2, sub {
+        Mammotion_SendCommand($hash, "get_status", $devName, $iotId);
+    }, $hash, 0);
 }
 
 sub Mammotion_PythonTimeout {

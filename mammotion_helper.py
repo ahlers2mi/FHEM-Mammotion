@@ -18,7 +18,7 @@ Aktionen (MQTT):
   start_zone       <device_name> <iot_id> <zone_hash>
   get_status       <device_name> <iot_id>
   get_tasks        <device_name> <iot_id>
-  start_task       <device_name> <iot_id> <task_id>
+  start_task       <device_name> <iot_id> <plan_id>
 """
 
 import sys
@@ -235,27 +235,14 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
 
         elif action == "start_task":
             if not extra_params:
-                return {"ok": False, "error": "task_id parameter required"}
-            task_id_input = extra_params[0]
-
-            mower = mammotion.mower(device_name)
-            plan_id_to_use = task_id_input
-
-            try:
-                plan_map = getattr(getattr(mower, "map", None), "plan", {}) or {}
-                for pid, plan in plan_map.items():
-                    t_id = getattr(plan, "task_id", "") or getattr(plan, "job_id", "") or pid
-                    if str(t_id) == str(task_id_input) or str(pid) == str(task_id_input):
-                        plan_id_to_use = pid
-                        break
-            except Exception:
-                pass
+                return {"ok": False, "error": "plan_id parameter required"}
+            plan_id = extra_params[0]
 
             await mammotion.send_command_with_args(
                 device_name, "single_schedule",
-                plan_id=plan_id_to_use
+                plan_id=plan_id
             )
-            return {"ok": True, "action": "start_task", "task_id": task_id_input, "plan_id": plan_id_to_use}
+            return {"ok": True, "action": "start_task", "plan_id": plan_id}
 
         elif action == "get_status":
             mower = mammotion.mower(device_name)
