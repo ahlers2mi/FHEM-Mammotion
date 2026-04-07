@@ -483,6 +483,8 @@ sub Mammotion_FetchDevices {
         Log3($name, 2, "[$name] BlockingCall fehlgeschlagen!");
         $hash->{RUNNING} = 0;
         readingsSingleUpdate($hash, "state", "error", 1);
+    } else {
+        InternalTimer(gettimeofday() + 90, "Mammotion_WatchdogReset", $hash, 0);
     }
 }
 
@@ -521,6 +523,10 @@ sub Mammotion_SendCommand {
         Log3($name, 2, "[$name] BlockingCall fuer $action fehlgeschlagen!");
         $hash->{RUNNING} = 0;
         readingsSingleUpdate($hash, "state", "error", 1);
+    } else {
+        my $watchdog_timeout = ($action =~ /^(get_zones|start_zone|get_tasks|start_task)$/) ? 210 :
+                               ($action eq "get_status") ? 90 : 120;
+        InternalTimer(gettimeofday() + $watchdog_timeout, "Mammotion_WatchdogReset", $hash, 0);
     }
 }
 
@@ -597,6 +603,7 @@ sub Mammotion_PythonDone {
 
     delete $hash->{helper};
     $hash->{RUNNING} = 0;
+    RemoveInternalTimer($hash, "Mammotion_WatchdogReset");
 
     my $timestamp = strftime("%Y-%m-%d %H:%M:%S", localtime());
 
@@ -847,11 +854,28 @@ sub Mammotion_PythonTimeout {
 
     delete $hash->{helper};
     $hash->{RUNNING} = 0;
+    RemoveInternalTimer($hash, "Mammotion_WatchdogReset");
     Log3($name, 2, "[$name] Timeout!");
     readingsBeginUpdate($hash);
     readingsBulkUpdate($hash, "last_error", "Timeout");
     readingsBulkUpdate($hash, "state",      "timeout");
     readingsEndUpdate($hash, 1);
+}
+
+sub Mammotion_WatchdogReset {
+    my ($hash) = @_;
+    my $name = $hash->{NAME};
+
+    if ($hash->{RUNNING}) {
+        Log3($name, 2, "[$name] Watchdog: RUNNING-Flag war haengengeblieben, wird zurueckgesetzt!");
+        BlockingKill($hash->{helper}) if defined($hash->{helper});
+        delete $hash->{helper};
+        $hash->{RUNNING} = 0;
+        readingsBeginUpdate($hash);
+        readingsBulkUpdate($hash, "last_error", "Watchdog: Verbindung unterbrochen");
+        readingsBulkUpdate($hash, "state",      "error");
+        readingsEndUpdate($hash, 1);
+    }
 }
 
 1;
