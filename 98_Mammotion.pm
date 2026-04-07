@@ -138,8 +138,17 @@ sub Mammotion_BuildSetList {
     }
 
     return join(" ", map {
-        $dynamic_sets{$_} eq "noArg" ? $_ : "$_:$dynamic_sets{$_}"
+        $dynamic_sets{$_} eq "noArg" ? "$_:noArg" : "$_:$dynamic_sets{$_}"
     } sort keys %dynamic_sets);
+}
+
+sub Mammotion_BuildGetList {
+    my ($hash) = @_;
+    my %dynamic_gets = %gets;
+
+    return join(" ", map {
+        $dynamic_gets{$_} eq "noArg" ? "$_:noArg" : "$_:$dynamic_gets{$_}"
+    } sort keys %dynamic_gets);
 }
 
 sub Mammotion_Set {
@@ -293,13 +302,11 @@ sub Mammotion_Get {
     my ($hash, $name, $cmd, @args) = @_;
 
     if ($cmd eq "?") {
-        my $list = join(" ", map { "$_: $gets{$_}" } sort keys %gets);
-        return "Unknown argument $cmd, choose one of $list";
+        return "Unknown argument $cmd, choose one of " . Mammotion_BuildGetList($hash);
     }
 
     if (!exists($gets{$cmd})) {
-        my $list = join(" ", map { "$_: $gets{$_}" } sort keys %gets);
-        return "Unknown argument $cmd, choose one of $list";
+        return "Unknown argument $cmd, choose one of " . Mammotion_BuildGetList($hash);
     }
 
     if ($cmd eq "devices") {
