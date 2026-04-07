@@ -252,19 +252,22 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
-            mower_state = mower.mower_state
-            report      = mower.report_data if hasattr(mower, "report_data") else None
+            if not hasattr(mower, "report_data") or mower.report_data is None:
+                return {"ok": False, "error": "Report data not available"}
+            dev = mower.report_data.dev
+            if dev is None:
+                return {"ok": False, "error": "Device data not available"}
+
+            location = mower.location if hasattr(mower, "location") else None
 
             result = {
                 "ok":           True,
                 "action":       "get_status",
-                "charge_state": getattr(mower_state, "charge_state", 0),
-                "battery":      getattr(mower_state, "battery_percent", 0),
-                "work_state":   getattr(mower_state, "work_state", 0),
-                "mow_zone":     getattr(mower_state, "mow_zone", 0),
+                "charge_state": dev.charge_state,
+                "battery":      dev.battery_val,
+                "work_state":   dev.sys_status,
+                "mow_zone":     location.work_zone if location is not None else 0,
             }
-            if report:
-                result["rpt_work_state"] = getattr(report, "work_state", 0)
             return result
 
         else:
