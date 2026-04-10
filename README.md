@@ -15,7 +15,7 @@ FHEM-Modul zur Anbindung von Mammotion Rasenmähern (Luba, Yuka u.a.) über die 
 ## Voraussetzungen
 
 - FHEM-Installation (Perl-basiert)
-- Python 3.13 mit der [pymammotion](https://github.com/mikey0000/PyMammotion) Bibliothek
+- Python **3.13** mit der [pymammotion](https://github.com/mikey0000/PyMammotion) Bibliothek
 - Mammotion Cloud-Account (E-Mail + Passwort)
 
 ### Python-Abhängigkeiten installieren
