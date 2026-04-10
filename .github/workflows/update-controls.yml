@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'FHEM/98_Mammotion.pm'
+      - 'FHEM/mammotion_helper.py'
   workflow_dispatch:
 
 jobs:
@@ -19,6 +20,11 @@ jobs:
           SIZE=$(wc -c < FHEM/98_Mammotion.pm)
           DATE=$(date -u +"%Y-%m-%d_%H:%M:%S")
           echo "UPD ${DATE} ${SIZE} FHEM/98_Mammotion.pm" > controls_Mammotion.txt
+      - name: Update controls_Mammotion.txt
+        run: |
+          SIZE=$(wc -c < FHEM/mammotion_helper.py)
+          DATE=$(date -u +"%Y-%m-%d_%H:%M:%S")
+          echo "UPD ${DATE} ${SIZE} FHEM/mammotion_helper.py" >> controls_Mammotion.txt
 
       - name: Commit updated controls_Mammotion.txt
         run: |
