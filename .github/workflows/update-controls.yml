@@ -1,0 +1,29 @@
+name: Update controls_Mammotion.txt
+
+on:
+  push:
+    paths:
+      - 'FHEM/98_Mammotion.pm'
+  workflow_dispatch:
+
+jobs:
+  update-controls:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update controls_Mammotion.txt
+        run: |
+          SIZE=$(wc -c < FHEM/98_Mammotion.pm)
+          DATE=$(date -u +"%Y-%m-%d_%H:%M:%S")
+          echo "UPD ${DATE} ${SIZE} FHEM/98_Mammotion.pm" > controls_Mammotion.txt
+
+      - name: Commit updated controls_Mammotion.txt
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add controls_Mammotion.txt
+          git diff --cached --quiet || git commit -m "Auto-update controls_Mammotion.txt"
+          git push
