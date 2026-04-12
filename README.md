@@ -126,9 +126,28 @@ Zeigt Gerätename, Typ, IoT-ID, Akkustand, Arbeits- und Ladestatus sowie verfüg
 
 | Attribut | Beschreibung | Standard |
 |---|---|---|
+| `disable` | Modul deaktivieren (1 = deaktiviert, 0 = aktiv). Stoppt alle Timer und blockiert `set`/`get`-Befehle. | `0` |
 | `interval` | Polling-Intervall in Sekunden | `300` |
 | `python_bin` | Pfad zum Python-Interpreter | `/usr/bin/python3.13` |
 | `helper_script` | Pfad zum Python-Hilfsskript | `/opt/fhem/FHEM/mammotion_helper.py` |
+
+### Modul deaktivieren und wieder aktivieren
+
+```
+# Modul deaktivieren (stoppt Polling, blockiert set/get)
+attr Yuka disable 1
+
+# Modul wieder aktivieren (startet Polling nach 30 Sekunden)
+attr Yuka disable 0
+```
+
+Wenn `disable 1` gesetzt ist:
+- Alle laufenden `InternalTimer` werden entfernt.
+- Laufende BlockingCall-Prozesse werden sauber beendet und das `RUNNING`-Flag zurückgesetzt.
+- `set`- und `get`-Befehle werden mit einer Fehlermeldung blockiert.
+- Das Reading `state` wird auf `disabled` gesetzt.
+
+Wird `disable` auf `0` zurückgesetzt oder das Attribut gelöscht, startet das Polling automatisch nach 30 Sekunden neu.
 
 ## Readings
 
@@ -172,6 +191,7 @@ set Yuka return_home
 
 | Version | Datum | Änderung |
 |---|---|---|
+| 1.4.0 | 2026-04-12 | Neues Attribut `disable` zum Deaktivieren des Moduls (stoppt Timer, blockiert set/get, setzt state auf `disabled`) |
 | 1.3.0 | 2026-04-10 | Watchdog-Timer für hängende Prozesse; Aufgaben (Tasks/Pläne) via `get_tasks` und `start_task` |
 | 1.2.0 | 2026-04-10 | Dynamische Dropdowns für Zonen und Aufgaben im FHEM-Frontend |
 | 1.1.0 | 2026-04-10 | `get_status` automatisch nach Geräte-Update; Arbeitsstatus-Texte |

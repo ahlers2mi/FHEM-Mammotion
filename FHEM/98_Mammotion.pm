@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.3.0";
+my $MODULE_VERSION = "1.4.0";
 
 my %sets = (
     "update"       => "noArg",
@@ -55,7 +55,8 @@ sub Mammotion_Initialize {
     $hash->{SetFn}    = "Mammotion_Set";
     $hash->{GetFn}    = "Mammotion_Get";
     $hash->{AttrFn}   = "Mammotion_Attr";
-    $hash->{AttrList} = "interval:60,120,300,600 "
+    $hash->{AttrList} = "disable:0,1 "
+                      . "interval:60,120,300,600 "
                       . "python_bin "
                       . "helper_script "
                       . $readingFnAttributes;
@@ -96,8 +97,13 @@ sub Mammotion_Define {
 
     Log3($name, 3, "[$name] Mammotion definiert. Account: $account, Geraet: $deviceName");
 
-    InternalTimer(gettimeofday() + 30, "Mammotion_UpdateTimer", $hash, 0);
-    readingsSingleUpdate($hash, "state", "initialized", 1);
+    if (AttrVal($name, "disable", 0)) {
+        readingsSingleUpdate($hash, "state", "disabled", 1);
+        Log3($name, 3, "[$name] Modul ist deaktiviert (disable=1), Timer wird nicht gestartet.");
+    } else {
+        InternalTimer(gettimeofday() + 30, "Mammotion_UpdateTimer", $hash, 0);
+        readingsSingleUpdate($hash, "state", "initialized", 1);
+    }
 
     return undef;
 }
@@ -156,6 +162,10 @@ sub Mammotion_Set {
 
     if ($cmd eq "?") {
         return "Unknown argument $cmd, choose one of " . Mammotion_BuildSetList($hash);
+    }
+
+    if (AttrVal($name, "disable", 0)) {
+        return "[$name] Modul ist deaktiviert (disable=1). Bitte erst 'attr $name disable 0' setzen.";
     }
 
     if (!exists($sets{$cmd})) {
@@ -305,6 +315,10 @@ sub Mammotion_Get {
         return "Unknown argument $cmd, choose one of " . Mammotion_BuildGetList($hash);
     }
 
+    if (AttrVal($name, "disable", 0)) {
+        return "[$name] Modul ist deaktiviert (disable=1). Bitte erst 'attr $name disable 0' setzen.";
+    }
+
     if (!exists($gets{$cmd})) {
         return "Unknown argument $cmd, choose one of " . Mammotion_BuildGetList($hash);
     }
@@ -424,6 +438,26 @@ sub Mammotion_Attr {
     my ($cmd, $name, $attr, $val) = @_;
     my $hash = $defs{$name};
 
+    if ($attr eq "disable") {
+        if ($cmd eq "set" && $val) {
+            # Disable: stop timers, kill running helper, set state
+            RemoveInternalTimer($hash);
+            if (defined($hash->{helper})) {
+                BlockingKill($hash->{helper});
+                delete $hash->{helper};
+            }
+            $hash->{RUNNING} = 0;
+            readingsSingleUpdate($hash, "state", "disabled", 1);
+            Log3($name, 3, "[$name] Modul deaktiviert.");
+        } else {
+            # Enable (del or set 0): restart timer
+            readingsSingleUpdate($hash, "state", "initialized", 1);
+            InternalTimer(gettimeofday() + 30, "Mammotion_UpdateTimer", $hash, 0);
+            Log3($name, 3, "[$name] Modul aktiviert, Timer gestartet.");
+        }
+        return undef;
+    }
+
     if ($attr eq "interval") {
         RemoveInternalTimer($hash);
         $hash->{INTERVAL} = $val;
@@ -437,6 +471,8 @@ sub Mammotion_Attr {
 sub Mammotion_UpdateTimer {
     my ($hash) = @_;
     my $name = $hash->{NAME};
+
+    return if AttrVal($name, "disable", 0);
 
     Mammotion_FetchDevices($hash);
 
@@ -933,6 +969,17 @@ sub Mammotion_WatchdogReset {
   <ul>
     <li>1. <code>get &lt;name&gt; tasks</code> - Aufgaben laden</li>
     <li>2. <code>set &lt;name&gt; start_task &lt;id_oder_name&gt;</code> - Aufgabe starten</li>
+  </ul>
+
+  <b>Attributes:</b><br>
+  <ul>
+    <li><code>disable 0|1</code> - Modul deaktivieren (1) oder aktivieren (0).
+      Bei <code>disable 1</code> werden alle Timer gestoppt, laufende Prozesse beendet,
+      <code>set</code>/<code>get</code>-Befehle blockiert und <code>state</code> auf <code>disabled</code> gesetzt.
+      Bei <code>disable 0</code> startet das Polling nach 30 Sekunden neu.</li>
+    <li><code>interval 60|120|300|600</code> - Polling-Intervall in Sekunden (Standard: 300)</li>
+    <li><code>python_bin</code> - Pfad zum Python-Interpreter</li>
+    <li><code>helper_script</code> - Pfad zum Python-Hilfsskript</li>
   </ul>
 </ul>
 
