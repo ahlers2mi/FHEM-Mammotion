@@ -306,7 +306,8 @@ async def run(account, password, action, params):
         extra_params = params[2:] if len(params) > 2 else []
         return await mqtt_action(account, password, device_name, iot_id, action, extra_params)
 
-    http = MammotionHTTP()
+    http = MammotionHTTP(account=account, password=password, ha_version="2.3.4.22")
+    await http.login(account, password)
     try:
         try:
             await http.login(account, password)
