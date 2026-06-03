@@ -36,7 +36,7 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.5"
+HELPER_VERSION = "1.7.6"
 
 
 # Optionaler Override fuer den App-Version-Header beim Login. Mammotion kann
@@ -117,6 +117,16 @@ def _patch_legacy_login():
 
     MammotionHTTP.login_v2 = _login_v2_via_legacy
     MammotionHTTP._fhem_legacy_login_patched = True
+
+
+def _swallow_task_result(task):
+    """done-Callback fuer fire-and-forget Tasks: holt eine evtl. Exception ab,
+    damit kein "Task exception was never retrieved" im stderr landet."""
+    try:
+        if not task.cancelled():
+            task.exception()
+    except Exception:
+        pass
 
 
 async def get_devices(http):
@@ -253,6 +263,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             # Geraete-State pollen (die Saga fuellt device.map.area inkrementell,
             # waehrend wir schlafen). So bleibt die Laufzeit hart begrenzt.
             sync_task = asyncio.ensure_future(map_sync(device_name))
+            sync_task.add_done_callback(_swallow_task_result)
 
             wait_max = 90
             wait_step = 3
@@ -424,7 +435,8 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
         # blockieren. Der Prozess endet ohnehin gleich per os._exit (schliesst
         # alle Sockets) -- ein sauberer Disconnect ist nicht noetig.
         try:
-            asyncio.ensure_future(stop())
+            _stop_task = asyncio.ensure_future(stop())
+            _stop_task.add_done_callback(_swallow_task_result)
         except Exception:
             pass
 
