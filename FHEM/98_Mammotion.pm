@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.4.1";
+my $MODULE_VERSION = "1.5.0";
 
 my %sets = (
     "update"       => "noArg",
@@ -59,6 +59,7 @@ sub Mammotion_Initialize {
                       . "interval:60,120,300,600 "
                       . "python_bin "
                       . "helper_script "
+                      . "app_version "
                       . $readingFnAttributes;
     $hash->{MODULE_VERSION} = $MODULE_VERSION;
 
@@ -580,6 +581,9 @@ sub Mammotion_PythonCall {
 
     eval {
         my @cmd = ($py, $script, $account, $password, $action, @params);
+        # App-Version-Header fuer den Mammotion-Login (siehe Attribut app_version).
+        my $app_version = AttrVal($name, "app_version", "NOT HA,2.3.4.22");
+        push @cmd, "--app-version", $app_version if $app_version;
         my $fhem_verbose = AttrVal($name, "verbose", 3);
         push @cmd, "-v" if $fhem_verbose >= 5;
         my $pid = open3(my $stdin, my $stdout, $stderr_fh, @cmd);
@@ -990,6 +994,12 @@ sub Mammotion_WatchdogReset {
     <li><code>interval 60|120|300|600</code> - Polling-Intervall in Sekunden (Standard: 300)</li>
     <li><code>python_bin</code> - Pfad zum Python-Interpreter</li>
     <li><code>helper_script</code> - Pfad zum Python-Hilfsskript</li>
+    <li><code>app_version</code> - App-Version-Header fuer den Mammotion-Login
+      (Standard: <code>NOT HA,2.3.4.22</code>). Mammotion lehnt veraltete
+      App-Versionen ab; der Login scheitert dann mit
+      <code>Attempt to decode JSON with unexpected mimetype</code>. Bei
+      kuenftigen Aenderungen der Mammotion-Cloud kann hier die aktuelle
+      App-Version gesetzt werden, z.B. <code>HA,2.3.4.22</code>.</li>
   </ul>
 </ul>
 

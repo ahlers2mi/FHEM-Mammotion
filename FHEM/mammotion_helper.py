@@ -1,7 +1,11 @@
 #!/usr/bin/env python3.13
 """
 Mammotion Cloud API Helper fuer FHEM
-Aufruf: mammotion_helper.py <account> <password> <action> [params...]
+Aufruf: mammotion_helper.py <account> <password> <action> [params...] [--app-version <ver>] [-v]
+
+Optionen:
+  --app-version <ver>   App-Version-Header fuer den Login (Default: NOT HA,2.3.4.22)
+  -v / --verbose        Debug-Logging auf stderr
 
 Aktionen (nur HTTP):
   get_devices
@@ -25,6 +29,44 @@ import sys
 import json
 import asyncio
 import logging
+
+
+# Mammotion lehnt veraltete App-Version-Header beim Login ab: der Server
+# antwortet dann mit HTTP 200 ohne Token-JSON, was in pymammotion zu
+# "Attempt to decode JSON with unexpected mimetype" fuehrt. Aktuelle App-Version
+# laut pymammotion-Konstante. Per FHEM-Attribut "app_version" ueberschreibbar.
+DEFAULT_APP_VERSION = "NOT HA,2.3.4.22"
+
+
+def _patch_app_version(app_version):
+    """Setzt den App-Version-Header auf allen MammotionHTTP-Instanzen.
+
+    Wird nachtraeglich auf der Instanz gesetzt, damit es mit jeder
+    pymammotion-Version funktioniert. Der Konstruktor-Parameter "ha_version"
+    existiert nur in unveroeffentlichten pymammotion-Versionen und wuerde mit
+    der PyPI-Version einen TypeError ("unknown parameter ha_version") ausloesen.
+    """
+    if not app_version:
+        return
+    from pymammotion.http.http import MammotionHTTP
+
+    # Wert immer aktualisieren; Patch nur einmal installieren.
+    MammotionHTTP._fhem_app_version_value = app_version
+    if getattr(MammotionHTTP, "_fhem_app_version_patched", False):
+        return
+
+    _orig_init = MammotionHTTP.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        kwargs.pop("ha_version", None)  # von aelteren Versionen nicht unterstuetzt
+        _orig_init(self, *args, **kwargs)
+        try:
+            self._headers["App-Version"] = MammotionHTTP._fhem_app_version_value
+        except Exception:
+            pass
+
+    MammotionHTTP.__init__ = _patched_init
+    MammotionHTTP._fhem_app_version_patched = True
 
 
 async def get_devices(http):
@@ -289,8 +331,15 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             pass
 
 
-async def run(account, password, action, params):
+async def run(account, password, action, params, app_version=DEFAULT_APP_VERSION):
     from pymammotion.http.http import MammotionHTTP
+
+    # App-Version-Header korrigieren, bevor MammotionHTTP verwendet wird
+    # (auch fuer die intern vom MQTT-Login erzeugte Instanz).
+    try:
+        _patch_app_version(app_version)
+    except Exception:
+        pass
 
     mqtt_actions = {
         "start_mowing", "stop_mowing", "pause_mowing", "resume_mowing",
@@ -332,7 +381,28 @@ async def run(account, password, action, params):
 if __name__ == "__main__":
     argv = sys.argv[1:]
     verbose = "-v" in argv or "--verbose" in argv
-    argv = [a for a in argv if a not in ("-v", "--verbose")]
+
+    # Flags herausloesen (--app-version <wert> oder --app-version=<wert>),
+    # damit die positionalen Argumente unveraendert bleiben.
+    app_version = DEFAULT_APP_VERSION
+    cleaned = []
+    skip_next = False
+    for i, a in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if a in ("-v", "--verbose"):
+            continue
+        if a == "--app-version":
+            if i + 1 < len(argv):
+                app_version = argv[i + 1]
+                skip_next = True
+            continue
+        if a.startswith("--app-version="):
+            app_version = a.split("=", 1)[1]
+            continue
+        cleaned.append(a)
+    argv = cleaned
 
     if verbose:
         logging.basicConfig(level=logging.DEBUG, force=True)
@@ -340,7 +410,7 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.WARNING)
 
     if len(argv) < 3:
-        print(json.dumps({"ok": False, "error": "Usage: mammotion_helper.py <account> <password> <action> [params...] [-v]"}))
+        print(json.dumps({"ok": False, "error": "Usage: mammotion_helper.py <account> <password> <action> [params...] [--app-version <ver>] [-v]"}))
         sys.exit(1)
 
     account  = argv[0]
@@ -349,7 +419,7 @@ if __name__ == "__main__":
     params   = argv[3:] if len(argv) > 3 else []
 
     try:
-        result = asyncio.run(run(account, password, action, params))
+        result = asyncio.run(run(account, password, action, params, app_version))
         print(json.dumps(result))
         sys.exit(0)
     except Exception as e:
