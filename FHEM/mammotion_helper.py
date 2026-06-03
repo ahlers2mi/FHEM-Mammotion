@@ -240,25 +240,27 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             return {"ok": True, "action": action}
 
         elif action == "get_zones":
-            await map_sync(device_name)
+            # Map-Sync zeitlich begrenzen: in der neuen API wartet start_map_sync
+            # auf die (teils langsame/haengende) Saga. wait_for verhindert den
+            # harten BlockingCall-Kill -> sauberer Abschluss + stop().
+            try:
+                await asyncio.wait_for(map_sync(device_name), timeout=120)
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
 
-            # Wait until zone count is stable (all MQTT packets received)
-            wait_max = 90
+            # Kurze Stabilisierung (alte API liefert Daten asynchron nach).
+            wait_max = 30
             wait_step = 3
             waited = 0
             stable_count = 0
-            stable_needed = 3
+            stable_needed = 2
             last_zone_count = -1
 
             while waited < wait_max:
-                await asyncio.sleep(wait_step)
-                waited += wait_step
                 mower = get_state(device_name)
-                if mower is None:
-                    stable_count = 0
-                    last_zone_count = -1
-                    continue
-                area_map = mower.map.area if hasattr(mower.map, "area") else {}
+                area_map = getattr(getattr(mower, "map", None), "area", {}) or {} if mower else {}
                 current_count = len(area_map)
                 if current_count > 0 and current_count == last_zone_count:
                     stable_count += 1
@@ -267,6 +269,8 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 else:
                     stable_count = 0
                 last_zone_count = current_count
+                await asyncio.sleep(wait_step)
+                waited += wait_step
 
             mower = get_state(device_name)
             if mower is None:
@@ -316,26 +320,31 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             return {"ok": True, "action": "start_zone", "zone_hash": zone_hash}
 
         elif action == "get_tasks":
-            # Plaene/Tasks via start_plan_sync (nicht start_map_sync)
-            await plan_sync(device_name)
+            # Plaene/Tasks via start_plan_sync (nicht start_map_sync), zeitlich
+            # begrenzt -> kein harter Kill, falls die Saga haengt.
+            try:
+                await asyncio.wait_for(plan_sync(device_name), timeout=90)
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
 
-            # Wait until all plans have arrived (plan count == total_plan_num)
-            wait_max = 90
+            # Kurze Stabilisierung (alte API liefert Daten asynchron nach).
+            wait_max = 30
             wait_step = 3
             waited = 0
 
             while waited < wait_max:
+                mower = get_state(device_name)
+                if mower is not None:
+                    plan_map = getattr(getattr(mower, "map", None), "plan", {}) or {}
+                    if plan_map:
+                        sample = next(iter(plan_map.values()))
+                        total = getattr(sample, "total_plan_num", 0)
+                        if total > 0 and len(plan_map) >= total:
+                            break  # all plans received
                 await asyncio.sleep(wait_step)
                 waited += wait_step
-                mower = get_state(device_name)
-                if mower is None:
-                    continue
-                plan_map = getattr(getattr(mower, "map", None), "plan", {}) or {}
-                if plan_map:
-                    sample = next(iter(plan_map.values()))
-                    total = getattr(sample, "total_plan_num", 0)
-                    if total > 0 and len(plan_map) >= total:
-                        break  # all plans received
 
             mower = get_state(device_name)
             if mower is None:
@@ -402,7 +411,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
 
     finally:
         try:
-            await stop()
+            await asyncio.wait_for(stop(), timeout=15)
         except Exception:
             pass
 

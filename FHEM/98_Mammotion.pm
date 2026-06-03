@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.7.0";
+my $MODULE_VERSION = "1.7.1";
 
 my %sets = (
     "update"       => "noArg",
@@ -546,8 +546,9 @@ sub Mammotion_SendCommand {
     my $arg = join("\x1F", $name, $hash->{ACCOUNT}, $hash->{PASSWORD},
                    $py, $script, $action, $deviceName, $iotId, @extra);
 
-    my $timeout = ($action =~ /^(get_zones|start_zone|get_tasks|start_task)$/) ? 180 :
-                  ($action eq "get_status") ? 60 : 90;
+    my $timeout = ($action eq "get_zones") ? 240 :
+                  ($action =~ /^(start_zone|get_tasks|start_task)$/) ? 180 :
+                  ($action eq "get_status") ? 90 : 90;
 
     $hash->{helper} = BlockingCall(
         "Mammotion_PythonCall",
@@ -563,9 +564,10 @@ sub Mammotion_SendCommand {
         $hash->{RUNNING} = 0;
         readingsSingleUpdate($hash, "state", "error", 1);
     } else {
-        # Watchdog: BlockingCall timeout + 30s buffer (180+30=210, 60+30=90, 90+30=120)
-        my $watchdog_timeout = ($action =~ /^(get_zones|start_zone|get_tasks|start_task)$/) ? 210 :
-                               ($action eq "get_status") ? 90 : 120;
+        # Watchdog: BlockingCall-Timeout + 30s Puffer
+        my $watchdog_timeout = ($action eq "get_zones") ? 270 :
+                               ($action =~ /^(start_zone|get_tasks|start_task)$/) ? 210 :
+                               ($action eq "get_status") ? 120 : 120;
         InternalTimer(gettimeofday() + $watchdog_timeout, "Mammotion_WatchdogReset", $hash, 0);
     }
 }
