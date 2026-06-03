@@ -36,7 +36,15 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.7"
+HELPER_VERSION = "1.7.8"
+
+
+# Wird von get_zones gesetzt: Funktion, die die aktuell bekannten Zonen aus dem
+# Geraete-State liest. Der Watchdog-THREAD nutzt sie, um die Zonen auszuliefern,
+# auch wenn der asyncio-Event-Loop durch synchrone pymammotion-Cloud-Aufrufe
+# (Aliyun-Gateway) blockiert ist -- dann laeuft der asyncio-Poll nicht, aber der
+# separate Thread kann den bereits gefuellten State lesen.
+_LIVE_ZONE_READER = {"fn": None}
 
 
 # Optionaler Override fuer den App-Version-Header beim Login. Mammotion kann
@@ -263,6 +271,23 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             # brechen ab, sobald die Liste stabil ist (lange vor dem Polygon-Fetch).
             sync_task = asyncio.ensure_future(map_sync(device_name))
             sync_task.add_done_callback(_swallow_task_result)
+
+            # Reader fuer den Watchdog-Thread: liest die Zonen-Namen aus dem
+            # Geraete-State (funktioniert auch bei eingefrorenem Event-Loop).
+            def _read_zones_now():
+                try:
+                    dev = get_state(device_name)
+                    mp2 = getattr(dev, "map", None) if dev else None
+                    out = []
+                    for it in (getattr(mp2, "area_name", []) or []):
+                        h = getattr(it, "hash", None)
+                        if h is None:
+                            continue
+                        out.append({"hash": h, "name": getattr(it, "name", "") or "Zone {}".format(h)})
+                    return out
+                except Exception:
+                    return None
+            _LIVE_ZONE_READER["fn"] = _read_zones_now
 
             wait_max = 75
             wait_step = 2
@@ -552,7 +577,7 @@ if __name__ == "__main__":
     # wf = asyncio-Timeout (sauberer Abbruch, falls Cancellation greift),
     # wd = harte Watchdog-Frist (Prozess-Exit, falls der Loop trotzdem haengt).
     _budget = {
-        "get_zones":  (180, 200),
+        "get_zones":  (110, 120),
         "start_zone": (140, 160),
         "get_tasks":  (140, 160),
         "start_task": (140, 160),
@@ -567,14 +592,50 @@ if __name__ == "__main__":
     import threading
     import time as _time
 
-    def _watchdog():
-        _time.sleep(wd)
+    def _emit_and_exit(result):
         try:
-            sys.stdout.write(json.dumps({"ok": False, "error": "Zeitueberschreitung bei Aktion {} (Watchdog)".format(action)}) + "\n")
+            sys.stdout.write(json.dumps(result) + "\n")
             sys.stdout.flush()
         except Exception:
             pass
         os._exit(0)
+
+    def _watchdog():
+        # Pollt aus diesem (separaten) Thread den Zonen-Reader -- noetig, weil der
+        # asyncio-Loop durch synchrone Aliyun-Gateway-Aufrufe einfrieren kann.
+        # Sobald die Zonen-Namen stabil sind, sofort ausliefern; sonst bei wd
+        # hart beenden (mit dem, was da ist).
+        deadline = _time.time() + wd
+        last = -1
+        stable = 0
+        while _time.time() < deadline:
+            _time.sleep(3)
+            reader = _LIVE_ZONE_READER["fn"]
+            if reader is None:
+                continue
+            try:
+                zones = reader()
+            except Exception:
+                zones = None
+            if zones:
+                if len(zones) == last:
+                    stable += 1
+                    if stable >= 2:
+                        _emit_and_exit({"ok": True, "action": "get_zones", "zones": zones})
+                else:
+                    stable = 0
+                last = len(zones)
+        # Frist erreicht: vorhandene Zonen ausliefern, sonst Timeout-Fehler.
+        reader = _LIVE_ZONE_READER["fn"]
+        zones = None
+        if reader is not None:
+            try:
+                zones = reader()
+            except Exception:
+                zones = None
+        if zones:
+            _emit_and_exit({"ok": True, "action": "get_zones", "zones": zones})
+        _emit_and_exit({"ok": False, "error": "Zeitueberschreitung bei Aktion {} (Watchdog)".format(action)})
 
     threading.Thread(target=_watchdog, daemon=True).start()
 
