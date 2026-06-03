@@ -36,7 +36,7 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.6"
+HELPER_VERSION = "1.7.7"
 
 
 # Optionaler Override fuer den App-Version-Header beim Login. Mammotion kann
@@ -256,39 +256,37 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             return {"ok": True, "action": action}
 
         elif action == "get_zones":
-            # Map-Sync NICHT blockierend abwarten: in der neuen API wartet
-            # start_map_sync auf die MapFetchSaga, die ueber die Cloud teils
-            # nicht/zu langsam durchkommt (-> frueher harter BlockingCall-Kill).
-            # Stattdessen Saga als Hintergrund-Task starten und nur den
-            # Geraete-State pollen (die Saga fuellt device.map.area inkrementell,
-            # waehrend wir schlafen). So bleibt die Laufzeit hart begrenzt.
+            # Die Zonen-NAMEN (toappAllHashName -> device.map.area_name) kommen
+            # frueh und vollstaendig. Der anschliessende per-Hash-Polygon-Fetch
+            # (device.map.area) ist langsam und stockt teils ganz. Fuer die
+            # Zonenauswahl brauchen wir nur Hash+Name -> wir pollen area_name und
+            # brechen ab, sobald die Liste stabil ist (lange vor dem Polygon-Fetch).
             sync_task = asyncio.ensure_future(map_sync(device_name))
             sync_task.add_done_callback(_swallow_task_result)
 
-            wait_max = 90
-            wait_step = 3
+            wait_max = 75
+            wait_step = 2
             waited = 0
             stable_count = 0
             stable_needed = 2
-            last_zone_count = -1
+            last_count = -1
 
             while waited < wait_max:
                 await asyncio.sleep(wait_step)
                 waited += wait_step
                 mower = get_state(device_name)
-                area_map = getattr(getattr(mower, "map", None), "area", {}) or {} if mower else {}
-                current_count = len(area_map)
-                if current_count > 0 and current_count == last_zone_count:
+                mp = getattr(mower, "map", None) if mower else None
+                names = getattr(mp, "area_name", []) or []
+                area  = getattr(mp, "area", {}) or {}
+                current_count = max(len(names), len(area))
+                if current_count > 0 and current_count == last_count:
                     stable_count += 1
                     if stable_count >= stable_needed:
                         break
                 else:
                     stable_count = 0
-                last_zone_count = current_count
+                last_count = current_count
 
-            # Hintergrund-Task nur abbrechen, NICHT abwarten: das Awaiten kann
-            # haengen, wenn die Saga die Cancellation verschluckt -> dann ginge
-            # das bereits gesammelte Ergebnis verloren. os._exit raeumt auf.
             if not sync_task.done():
                 sync_task.cancel()
 
@@ -296,18 +294,25 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
-            zones = []
-            area_map       = mower.map.area      if hasattr(mower.map, "area")      else {}
-            area_name_list = mower.map.area_name if hasattr(mower.map, "area_name") else []
-            # area_name ist list[AreaHashNameList(name, hash)] — zu dict konvertieren
-            name_map = {item.hash: item.name for item in area_name_list}
+            mp = getattr(mower, "map", None)
+            area_name_list = getattr(mp, "area_name", []) or []
+            area_map       = getattr(mp, "area", {}) or {}
+            sys.stderr.write("get_zones: waited={}s names={} area={}\n".format(waited, len(area_name_list), len(area_map)))
+            sys.stderr.flush()
 
-            for hash_id, area_data in area_map.items():
-                zone_name = name_map.get(hash_id, "Zone {}".format(hash_id))
-                zones.append({
-                    "hash":  hash_id,
-                    "name":  zone_name,
-                })
+            zones = []
+            seen = set()
+            # Primaer aus der Namensliste (Hash + Name, kommt frueh).
+            for item in area_name_list:
+                h = getattr(item, "hash", None)
+                if h is None:
+                    continue
+                zones.append({"hash": h, "name": getattr(item, "name", "") or "Zone {}".format(h)})
+                seen.add(h)
+            # Flaechen ohne Namenseintrag ergaenzen (falls vorhanden).
+            for hash_id in area_map:
+                if hash_id not in seen:
+                    zones.append({"hash": hash_id, "name": "Zone {}".format(hash_id)})
 
             return {"ok": True, "action": "get_zones", "zones": zones}
 
