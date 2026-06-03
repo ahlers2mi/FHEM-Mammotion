@@ -36,7 +36,7 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.4"
+HELPER_VERSION = "1.7.5"
 
 
 # Optionaler Override fuer den App-Version-Header beim Login. Mammotion kann
@@ -275,14 +275,11 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                     stable_count = 0
                 last_zone_count = current_count
 
-            # Hintergrund-Task best effort beenden. CancelledError ist eine
-            # BaseException (nicht Exception) -> breit abfangen.
+            # Hintergrund-Task nur abbrechen, NICHT abwarten: das Awaiten kann
+            # haengen, wenn die Saga die Cancellation verschluckt -> dann ginge
+            # das bereits gesammelte Ergebnis verloren. os._exit raeumt auf.
             if not sync_task.done():
                 sync_task.cancel()
-            try:
-                await asyncio.wait_for(sync_task, timeout=1)
-            except BaseException:
-                pass
 
             mower = get_state(device_name)
             if mower is None:
@@ -422,8 +419,12 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
         return {"ok": False, "error": "Command failed: {}".format(err)}
 
     finally:
+        # stop() nur anstossen, NICHT abwarten: ein MQTT-Disconnect bei aktivem
+        # Sync/Transport kann haengen und das Zurueckgeben des Ergebnisses
+        # blockieren. Der Prozess endet ohnehin gleich per os._exit (schliesst
+        # alle Sockets) -- ein sauberer Disconnect ist nicht noetig.
         try:
-            await asyncio.wait_for(stop(), timeout=15)
+            asyncio.ensure_future(stop())
         except Exception:
             pass
 
