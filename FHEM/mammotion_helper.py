@@ -5,6 +5,8 @@ Aufruf: mammotion_helper.py <account> <password> <action> [params...] [--app-ver
 
 Optionen:
   --app-version <ver>   App-Version-Header fuer den Login (Default: leer = pymammotion-Default)
+  --legacy-login        Cloud-Login ueber den alten login statt login_v2 (bei
+                        "Account or password mismatch" trotz korrekter Daten)
   -v / --verbose        Debug-Logging auf stderr
 
 Aktionen (nur HTTP):
@@ -69,6 +71,38 @@ def _patch_app_version(app_version):
 
     MammotionHTTP.__init__ = _patched_init
     MammotionHTTP._fhem_app_version_patched = True
+
+
+def _patch_legacy_login():
+    """Erzwingt den alten login (/oauth/token) statt login_v2 (/oauth2/token).
+
+    Manche Accounts werden von login_v2 mit "Account or password mismatch"
+    abgelehnt, obwohl exakt dieselben Daten beim alten login funktionieren
+    (vgl. PyMammotion#137). Wir leiten login_v2 auf den alten login um und
+    laden den fuer den Aliyun-IoT-Login noetigen authorization_code
+    anschliessend ueber /authorization/code nach.
+    """
+    from pymammotion.http.http import MammotionHTTP
+
+    if getattr(MammotionHTTP, "_fhem_legacy_login_patched", False):
+        return
+    # Nur sinnvoll, wenn der alte login + /authorization/code verfuegbar sind.
+    if not hasattr(MammotionHTTP, "login") or not hasattr(MammotionHTTP, "refresh_authorization_code"):
+        return
+
+    _orig_login = MammotionHTTP.login
+
+    async def _login_v2_via_legacy(self, account, password):
+        resp = await _orig_login(self, account, password)
+        if getattr(self, "login_info", None) is not None:
+            try:
+                await self.refresh_authorization_code()
+            except Exception:
+                pass
+        return resp
+
+    MammotionHTTP.login_v2 = _login_v2_via_legacy
+    MammotionHTTP._fhem_legacy_login_patched = True
 
 
 async def get_devices(http):
@@ -365,7 +399,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             pass
 
 
-async def run(account, password, action, params, app_version=DEFAULT_APP_VERSION):
+async def run(account, password, action, params, app_version=DEFAULT_APP_VERSION, legacy_login=False):
     from pymammotion.http.http import MammotionHTTP
 
     # App-Version-Header korrigieren, bevor MammotionHTTP verwendet wird
@@ -374,6 +408,13 @@ async def run(account, password, action, params, app_version=DEFAULT_APP_VERSION
         _patch_app_version(app_version)
     except Exception:
         pass
+
+    # Optional: login_v2 -> alten login umleiten (Attribut legacy_login).
+    if legacy_login:
+        try:
+            _patch_legacy_login()
+        except Exception:
+            pass
 
     mqtt_actions = {
         "start_mowing", "stop_mowing", "pause_mowing", "resume_mowing",
@@ -416,9 +457,10 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     verbose = "-v" in argv or "--verbose" in argv
 
-    # Flags herausloesen (--app-version <wert> oder --app-version=<wert>),
+    # Flags herausloesen (--app-version <wert>/=<wert>, --legacy-login),
     # damit die positionalen Argumente unveraendert bleiben.
     app_version = DEFAULT_APP_VERSION
+    legacy_login = False
     cleaned = []
     skip_next = False
     for i, a in enumerate(argv):
@@ -426,6 +468,9 @@ if __name__ == "__main__":
             skip_next = False
             continue
         if a in ("-v", "--verbose"):
+            continue
+        if a == "--legacy-login":
+            legacy_login = True
             continue
         if a == "--app-version":
             if i + 1 < len(argv):
@@ -444,7 +489,7 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.WARNING)
 
     if len(argv) < 3:
-        print(json.dumps({"ok": False, "error": "Usage: mammotion_helper.py <account> <password> <action> [params...] [--app-version <ver>] [-v]"}))
+        print(json.dumps({"ok": False, "error": "Usage: mammotion_helper.py <account> <password> <action> [params...] [--app-version <ver>] [--legacy-login] [-v]"}))
         sys.exit(1)
 
     account  = argv[0]
@@ -453,7 +498,7 @@ if __name__ == "__main__":
     params   = argv[3:] if len(argv) > 3 else []
 
     try:
-        result = asyncio.run(run(account, password, action, params, app_version))
+        result = asyncio.run(run(account, password, action, params, app_version, legacy_login))
         print(json.dumps(result))
         sys.exit(0)
     except Exception as e:
