@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.7.4";
+my $MODULE_VERSION = "1.7.5";
 
 my %sets = (
     "update"       => "noArg",
