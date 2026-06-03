@@ -86,8 +86,16 @@ def _patch_legacy_login():
 
     if getattr(MammotionHTTP, "_fhem_legacy_login_patched", False):
         return
-    # Nur sinnvoll, wenn der alte login + /authorization/code verfuegbar sind.
-    if not hasattr(MammotionHTTP, "login") or not hasattr(MammotionHTTP, "refresh_authorization_code"):
+    if not hasattr(MammotionHTTP, "login"):
+        return
+    # Methode, die den authorization_code ueber /authorization/code nachlaedt.
+    # Heisst je nach pymammotion-Version unterschiedlich.
+    authcode_method = None
+    for _m in ("refresh_authorization_code", "fetch_authorization_token"):
+        if hasattr(MammotionHTTP, _m):
+            authcode_method = _m
+            break
+    if authcode_method is None:
         return
 
     _orig_login = MammotionHTTP.login
@@ -96,7 +104,7 @@ def _patch_legacy_login():
         resp = await _orig_login(self, account, password)
         if getattr(self, "login_info", None) is not None:
             try:
-                await self.refresh_authorization_code()
+                await getattr(self, authcode_method)()
             except Exception:
                 pass
         return resp
