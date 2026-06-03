@@ -5,6 +5,8 @@ Aufruf: mammotion_helper.py <account> <password> <action> [params...] [--app-ver
 
 Optionen:
   --app-version <ver>   App-Version-Header fuer den Login (Default: leer = pymammotion-Default)
+  --legacy-login        Cloud-Login ueber den alten login statt login_v2 (bei
+                        "Account or password mismatch" trotz korrekter Daten)
   -v / --verbose        Debug-Logging auf stderr
 
 Aktionen (nur HTTP):
@@ -71,6 +73,46 @@ def _patch_app_version(app_version):
     MammotionHTTP._fhem_app_version_patched = True
 
 
+def _patch_legacy_login():
+    """Erzwingt den alten login (/oauth/token) statt login_v2 (/oauth2/token).
+
+    Manche Accounts werden von login_v2 mit "Account or password mismatch"
+    abgelehnt, obwohl exakt dieselben Daten beim alten login funktionieren
+    (vgl. PyMammotion#137). Wir leiten login_v2 auf den alten login um und
+    laden den fuer den Aliyun-IoT-Login noetigen authorization_code
+    anschliessend ueber /authorization/code nach.
+    """
+    from pymammotion.http.http import MammotionHTTP
+
+    if getattr(MammotionHTTP, "_fhem_legacy_login_patched", False):
+        return
+    if not hasattr(MammotionHTTP, "login"):
+        return
+    # Methode, die den authorization_code ueber /authorization/code nachlaedt.
+    # Heisst je nach pymammotion-Version unterschiedlich.
+    authcode_method = None
+    for _m in ("refresh_authorization_code", "fetch_authorization_token"):
+        if hasattr(MammotionHTTP, _m):
+            authcode_method = _m
+            break
+    if authcode_method is None:
+        return
+
+    _orig_login = MammotionHTTP.login
+
+    async def _login_v2_via_legacy(self, account, password):
+        resp = await _orig_login(self, account, password)
+        if getattr(self, "login_info", None) is not None:
+            try:
+                await getattr(self, authcode_method)()
+            except Exception:
+                pass
+        return resp
+
+    MammotionHTTP.login_v2 = _login_v2_via_legacy
+    MammotionHTTP._fhem_legacy_login_patched = True
+
+
 async def get_devices(http):
     resp = await http.get_user_device_list()
     if not resp or not resp.data:
@@ -103,15 +145,61 @@ async def get_devices(http):
 
 
 async def mqtt_action(account, password, device_name, iot_id, action, extra_params=None):
-    # 0.7.133-API: MammotionClient statt der alten Mammotion-Klasse.
-    # Der frueher noetige SSL/CA-Patch (get_ssl_context) entfaellt -- der Bug
-    # ist in aktuellen pymammotion-Versionen behoben.
-    from pymammotion.client import MammotionClient
+    # pymammotion hat die Geraete-/Cloud-API umgebaut. Wir unterstuetzen beide:
+    #   neu (ca. >= 0.7.117): pymammotion.client.MammotionClient
+    #   alt (ca. <= 0.7.82) : pymammotion.mammotion.devices.mammotion.Mammotion
+    # Einheitliche Helfer (login/get_state/map_sync/plan_sync/send/stop) kapseln
+    # die Unterschiede, sodass der Dispatch unten identisch bleibt.
+    try:
+        from pymammotion.client import MammotionClient
+        _new_api = True
+    except ImportError:
+        _new_api = False
 
-    client = MammotionClient()
+    if _new_api:
+        # Neue API: SSL/CA-Bug ist hier behoben, kein Patch noetig.
+        from pymammotion.data.model.generate_route_information import GenerateRouteInformation
+        client = MammotionClient()
+        login     = client.login_and_initiate_cloud
+        get_state = client.get_device_by_name
+        map_sync  = client.start_map_sync
+        plan_sync = client.start_plan_sync
+        stop      = client.stop
+        send      = client.send_command_with_args
+    else:
+        # Alte API: get_ssl_context() laedt die CA nicht korrekt
+        # (-> CERTIFICATE_VERIFY_FAILED), daher synchron nachladen.
+        import ssl as _ssl
+        from pymammotion.mqtt import aliyun_mqtt as _aliyun_mod
+
+        async def _fixed_get_ssl_context():
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+            ctx.options |= _ssl.OP_IGNORE_UNEXPECTED_EOF
+            ctx.load_verify_locations(cadata=_aliyun_mod._ALIYUN_BROKER_CA_DATA)
+            return ctx
+
+        _aliyun_mod.AliyunMQTT.get_ssl_context = staticmethod(_fixed_get_ssl_context)
+
+        from pymammotion.data.model import GenerateRouteInformation
+        from pymammotion.mammotion.devices.mammotion import Mammotion
+
+        Mammotion._instance = None
+        _m = Mammotion()
+        login     = _m.login_and_initiate_cloud
+        get_state = _m.mower
+        map_sync  = _m.start_map_sync
+        plan_sync = _m.start_schedule_sync
+        stop      = _m.stop
+
+        async def send(name, key, **kwargs):
+            if kwargs:
+                await _m.send_command_with_args(name, key, **kwargs)
+            else:
+                await _m.send_command(name, key)
+
     try:
         try:
-            await client.login_and_initiate_cloud(account, password)
+            await login(account, password)
         except Exception as e:
             err = " ".join(str(e).split())
             err = err.replace("'", " ").replace('"', " ").replace("\\", " ")
@@ -120,39 +208,39 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
         # Kurz warten, bis die MQTT-Transport-Verbindung steht.
         await asyncio.sleep(5)
 
-        if client.get_device_by_name(device_name) is None:
+        if get_state(device_name) is None:
             return {"ok": False, "error": "Geraet nicht gefunden: {}".format(device_name)}
 
         if action == "start_mowing":
-            await client.send_command_with_args(device_name, "start_job")
+            await send(device_name, "start_job")
             return {"ok": True, "action": action}
 
         elif action == "stop_mowing":
-            await client.send_command_with_args(device_name, "cancel_job")
+            await send(device_name, "cancel_job")
             return {"ok": True, "action": action}
 
         elif action == "pause_mowing":
-            await client.send_command_with_args(device_name, "pause_execute_task")
+            await send(device_name, "pause_execute_task")
             return {"ok": True, "action": action}
 
         elif action == "resume_mowing":
-            await client.send_command_with_args(device_name, "resume_execute_task")
+            await send(device_name, "resume_execute_task")
             return {"ok": True, "action": action}
 
         elif action == "return_home":
-            await client.send_command_with_args(device_name, "return_to_dock")
+            await send(device_name, "return_to_dock")
             return {"ok": True, "action": action}
 
         elif action == "leave_dock":
-            await client.send_command_with_args(device_name, "leave_dock")
+            await send(device_name, "leave_dock")
             return {"ok": True, "action": action}
 
         elif action == "along_border":
-            await client.send_command_with_args(device_name, "along_border")
+            await send(device_name, "along_border")
             return {"ok": True, "action": action}
 
         elif action == "get_zones":
-            await client.start_map_sync(device_name)
+            await map_sync(device_name)
 
             # Wait until zone count is stable (all MQTT packets received)
             wait_max = 90
@@ -165,7 +253,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             while waited < wait_max:
                 await asyncio.sleep(wait_step)
                 waited += wait_step
-                mower = client.get_device_by_name(device_name)
+                mower = get_state(device_name)
                 if mower is None:
                     stable_count = 0
                     last_zone_count = -1
@@ -180,7 +268,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                     stable_count = 0
                 last_zone_count = current_count
 
-            mower = client.get_device_by_name(device_name)
+            mower = get_state(device_name)
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
@@ -204,8 +292,6 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 return {"ok": False, "error": "zone_hash parameter required"}
             zone_hash = int(extra_params[0])
 
-            from pymammotion.data.model.generate_route_information import GenerateRouteInformation
-
             route_info = GenerateRouteInformation(
                 one_hashs=[zone_hash],
                 job_mode=3,
@@ -221,17 +307,17 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 path_order="",
             )
 
-            await client.send_command_with_args(
+            await send(
                 device_name, "generate_route_information",
                 generate_route_information=route_info
             )
             await asyncio.sleep(2)
-            await client.send_command_with_args(device_name, "start_job")
+            await send(device_name, "start_job")
             return {"ok": True, "action": "start_zone", "zone_hash": zone_hash}
 
         elif action == "get_tasks":
             # Plaene/Tasks via start_plan_sync (nicht start_map_sync)
-            await client.start_plan_sync(device_name)
+            await plan_sync(device_name)
 
             # Wait until all plans have arrived (plan count == total_plan_num)
             wait_max = 90
@@ -241,7 +327,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             while waited < wait_max:
                 await asyncio.sleep(wait_step)
                 waited += wait_step
-                mower = client.get_device_by_name(device_name)
+                mower = get_state(device_name)
                 if mower is None:
                     continue
                 plan_map = getattr(getattr(mower, "map", None), "plan", {}) or {}
@@ -251,7 +337,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                     if total > 0 and len(plan_map) >= total:
                         break  # all plans received
 
-            mower = client.get_device_by_name(device_name)
+            mower = get_state(device_name)
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
@@ -275,17 +361,17 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 return {"ok": False, "error": "plan_id parameter required"}
             plan_id = extra_params[0]
 
-            await client.send_command_with_args(
+            await send(
                 device_name, "single_schedule",
                 plan_id=plan_id
             )
             return {"ok": True, "action": "start_task", "plan_id": plan_id}
 
         elif action == "get_status":
-            await client.send_command_with_args(device_name, "get_report_cfg")
+            await send(device_name, "get_report_cfg")
             await asyncio.sleep(5)
 
-            mower = client.get_device_by_name(device_name)
+            mower = get_state(device_name)
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
@@ -316,12 +402,12 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
 
     finally:
         try:
-            await client.stop()
+            await stop()
         except Exception:
             pass
 
 
-async def run(account, password, action, params, app_version=DEFAULT_APP_VERSION):
+async def run(account, password, action, params, app_version=DEFAULT_APP_VERSION, legacy_login=False):
     from pymammotion.http.http import MammotionHTTP
 
     # App-Version-Header korrigieren, bevor MammotionHTTP verwendet wird
@@ -330,6 +416,13 @@ async def run(account, password, action, params, app_version=DEFAULT_APP_VERSION
         _patch_app_version(app_version)
     except Exception:
         pass
+
+    # Optional: login_v2 -> alten login umleiten (Attribut legacy_login).
+    if legacy_login:
+        try:
+            _patch_legacy_login()
+        except Exception:
+            pass
 
     mqtt_actions = {
         "start_mowing", "stop_mowing", "pause_mowing", "resume_mowing",
@@ -372,9 +465,10 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     verbose = "-v" in argv or "--verbose" in argv
 
-    # Flags herausloesen (--app-version <wert> oder --app-version=<wert>),
+    # Flags herausloesen (--app-version <wert>/=<wert>, --legacy-login),
     # damit die positionalen Argumente unveraendert bleiben.
     app_version = DEFAULT_APP_VERSION
+    legacy_login = False
     cleaned = []
     skip_next = False
     for i, a in enumerate(argv):
@@ -382,6 +476,9 @@ if __name__ == "__main__":
             skip_next = False
             continue
         if a in ("-v", "--verbose"):
+            continue
+        if a == "--legacy-login":
+            legacy_login = True
             continue
         if a == "--app-version":
             if i + 1 < len(argv):
@@ -400,7 +497,7 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.WARNING)
 
     if len(argv) < 3:
-        print(json.dumps({"ok": False, "error": "Usage: mammotion_helper.py <account> <password> <action> [params...] [--app-version <ver>] [-v]"}))
+        print(json.dumps({"ok": False, "error": "Usage: mammotion_helper.py <account> <password> <action> [params...] [--app-version <ver>] [--legacy-login] [-v]"}))
         sys.exit(1)
 
     account  = argv[0]
@@ -409,7 +506,7 @@ if __name__ == "__main__":
     params   = argv[3:] if len(argv) > 3 else []
 
     try:
-        result = asyncio.run(run(account, password, action, params, app_version))
+        result = asyncio.run(run(account, password, action, params, app_version, legacy_login))
         print(json.dumps(result))
         sys.exit(0)
     except Exception as e:

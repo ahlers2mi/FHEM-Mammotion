@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.6.0";
+my $MODULE_VERSION = "1.7.0";
 
 my %sets = (
     "update"       => "noArg",
@@ -60,6 +60,7 @@ sub Mammotion_Initialize {
                       . "python_bin "
                       . "helper_script "
                       . "app_version "
+                      . "legacy_login:0,1 "
                       . $readingFnAttributes;
     $hash->{MODULE_VERSION} = $MODULE_VERSION;
 
@@ -585,6 +586,8 @@ sub Mammotion_PythonCall {
         # app_version). Leer = App-Version der installierten pymammotion nutzen.
         my $app_version = AttrVal($name, "app_version", "");
         push @cmd, "--app-version", $app_version if ($app_version ne "");
+        # Optional: Cloud-Login ueber den alten login statt login_v2.
+        push @cmd, "--legacy-login" if AttrVal($name, "legacy_login", 0);
         my $fhem_verbose = AttrVal($name, "verbose", 3);
         push @cmd, "-v" if $fhem_verbose >= 5;
         my $pid = open3(my $stdin, my $stdout, $stderr_fh, @cmd);
@@ -1002,6 +1005,12 @@ sub Mammotion_WatchdogReset {
       <code>Attempt to decode JSON with unexpected mimetype</code>. In dem Fall
       hier eine aktuelle App-Version setzen, z.B.
       <code>Home Assistant,2.3.4.22</code> oder <code>NOT HA,2.3.4.22</code>.</li>
+    <li><code>legacy_login 0|1</code> - Steuert den Cloud-Login fuer Befehle/Status.
+      Bei <code>1</code> wird statt <code>login_v2</code> (<code>/oauth2/token</code>)
+      der aeltere <code>login</code> (<code>/oauth/token</code>) verwendet und der
+      <code>authorization_code</code> separat nachgeladen. Hilft, wenn der Cloud-Login
+      mit <code>Account or password mismatch</code> scheitert, obwohl die
+      Zugangsdaten korrekt sind (die Geraeteliste also funktioniert).</li>
   </ul>
 </ul>
 
