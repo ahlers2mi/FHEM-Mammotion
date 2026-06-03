@@ -77,7 +77,12 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
 
     Mammotion._instance = None
     mammotion = Mammotion()
-    await mammotion.login_and_initiate_cloud(account, password)
+    try:
+        await mammotion.login_and_initiate_cloud(account, password)
+    except Exception as e:
+        err = " ".join(str(e).split())
+        err = err.replace("'", " ").replace('"', " ").replace("\\", " ")
+        return {"ok": False, "error": "Login fehlgeschlagen: {}".format(err[:300])}
     await asyncio.sleep(5)
 
     try:
@@ -304,6 +309,16 @@ async def run(account, password, action, params):
     http = MammotionHTTP(account=account, password=password, ha_version="2.3.4.22")
     await http.login(account, password)
     try:
+        try:
+            await http.login(account, password)
+        except Exception as e:
+            # Login-Fehler sauber als Ergebnis zurueckgeben (Exit-Code 0),
+            # statt als Exception mit Exit-Code 1 abzubrechen. So landet die
+            # Meldung kontrolliert in last_error und das Modul bleibt bedienbar.
+            err = " ".join(str(e).split())
+            err = err.replace("'", " ").replace('"', " ").replace("\\", " ")
+            return {"ok": False, "error": "Login fehlgeschlagen: {}".format(err[:300])}
+
         if action == "get_devices":
             return await get_devices(http)
         else:

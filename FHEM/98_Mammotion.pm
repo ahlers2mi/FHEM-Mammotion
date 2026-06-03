@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.4.0";
+my $MODULE_VERSION = "1.4.1";
 
 my %sets = (
     "update"       => "noArg",
@@ -605,11 +605,21 @@ sub Mammotion_PythonCall {
     }
 
     if ($exit_code != 0) {
-        $stdout_content =~ s/'//g;
-        $stdout_content =~ s/"//g;
-        $stderr_content =~ s/'//g;
-        $stderr_content =~ s/"//g;
-        return "$name|ERROR|Exit-Code $exit_code: $stdout_content";
+        # Fehlertext aufbereiten: BlockingCall reicht das Ergebnis als
+        # single-quoted Perl-String an einen eval weiter
+        # ({Mammotion_PythonDone('...')}). Ein eingebettetes Newline, ein
+        # Anfuehrungszeichen oder ein abschliessender Backslash bricht den
+        # eval ab ("Cant find string terminator ... before EOF"). Dadurch
+        # wuerde Mammotion_PythonDone nie laufen und RUNNING haengenbleiben.
+        my $errtext = ($stdout_content ne "") ? $stdout_content : $stderr_content;
+        $errtext =~ s/[\r\n]+/ /g;     # Newlines -> Leerzeichen
+        $errtext =~ s/\\/ /g;          # Backslashes entfernen
+        $errtext =~ s/'//g;
+        $errtext =~ s/"//g;
+        $errtext =~ s/\s+/ /g;
+        $errtext =~ s/^\s+|\s+$//g;
+        $errtext = substr($errtext, 0, 300) . "..." if (length($errtext) > 300);
+        return "$name|ERROR|Exit-Code $exit_code: $errtext";
     }
 
     my $json_line = "";
