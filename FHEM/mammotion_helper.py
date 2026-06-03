@@ -36,7 +36,7 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.10"
+HELPER_VERSION = "1.7.11"
 
 # Nach einem Kommando (MQTT-Publish) MUESSEN wir kurz warten, BEVOR der Prozess
 # per os._exit() hart beendet wird. send_command_with_args() reiht die Nachricht
@@ -387,15 +387,40 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 # (cover_path_upload), erst damit ist der Job "committet".
                 # Erst danach start_job. (generate_route_information + start_job
                 # allein laesst das Geraet planen, aber NICHT losfahren.)
-                try:
-                    await asyncio.wait_for(
-                        mow_path(device_name, [zone_hash], route_info=route_info),
-                        timeout=120,
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(1)
-                await send(device_name, "start_job")
+                #
+                # Problem in der Praxis: kurz nach dem Login baut pymammotion die
+                # Cloud-Session neu auf (Lazy-Connect + Token-Refresh). Faellt die
+                # Saga in dieses Fenster, bricht sie mit 29003 "identityId is
+                # blank" ab -> der inkrementelle Token-Refresh schlaegt fehl,
+                # pymammotion loggt sich daraufhin aber VOLL neu ein. Auf dieser
+                # frischen Session laeuft die Saga dann durch. Deshalb: Saga bei
+                # Fehlschlag erneut versuchen (mit kurzer Pause, damit die
+                # Neuanmeldung steht), bevor wir start_job senden.
+                committed = False
+                last_err = ""
+                for attempt in range(3):
+                    try:
+                        await asyncio.wait_for(
+                            mow_path(device_name, [zone_hash], route_info=route_info),
+                            timeout=60,
+                        )
+                        committed = True
+                        sys.stderr.write("start_zone: MowPathSaga erfolgreich (Versuch {})\n".format(attempt + 1))
+                        sys.stderr.flush()
+                        break
+                    except Exception as e:
+                        last_err = " ".join(str(e).split())[:200]
+                        sys.stderr.write("start_zone: MowPathSaga Versuch {} fehlgeschlagen: {}\n".format(attempt + 1, last_err))
+                        sys.stderr.flush()
+                        # Der gescheiterte Versuch stoesst in pymammotion eine
+                        # volle Neuanmeldung an -> kurz warten, bis sie steht.
+                        await asyncio.sleep(8)
+                if committed:
+                    await asyncio.sleep(2)
+                    await send(device_name, "start_job")
+                else:
+                    return {"ok": False, "action": "start_zone", "zone_hash": zone_hash,
+                            "error": "Maehbahn konnte nicht erzeugt werden (MowPathSaga): {}".format(last_err)}
             else:
                 # Alte API: Best-effort (kein MowPathSaga verfuegbar).
                 await send(
@@ -618,7 +643,7 @@ if __name__ == "__main__":
     # wd = harte Watchdog-Frist (Prozess-Exit, falls der Loop trotzdem haengt).
     _budget = {
         "get_zones":  (110, 120),
-        "start_zone": (140, 160),
+        "start_zone": (200, 220),
         "get_tasks":  (140, 160),
         "start_task": (140, 160),
         "get_status": (70, 80),

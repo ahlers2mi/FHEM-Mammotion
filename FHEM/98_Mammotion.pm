@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.7.10";
+my $MODULE_VERSION = "1.7.11";
 
 my %sets = (
     "update"       => "noArg",
@@ -547,7 +547,8 @@ sub Mammotion_SendCommand {
                    $py, $script, $action, $deviceName, $iotId, @extra);
 
     my $timeout = ($action eq "get_zones") ? 240 :
-                  ($action =~ /^(start_zone|get_tasks|start_task)$/) ? 180 :
+                  ($action eq "start_zone") ? 240 :
+                  ($action =~ /^(get_tasks|start_task)$/) ? 180 :
                   ($action eq "get_status") ? 90 : 90;
 
     $hash->{helper} = BlockingCall(
@@ -566,7 +567,8 @@ sub Mammotion_SendCommand {
     } else {
         # Watchdog: BlockingCall-Timeout + 30s Puffer
         my $watchdog_timeout = ($action eq "get_zones") ? 270 :
-                               ($action =~ /^(start_zone|get_tasks|start_task)$/) ? 210 :
+                               ($action eq "start_zone") ? 270 :
+                               ($action =~ /^(get_tasks|start_task)$/) ? 210 :
                                ($action eq "get_status") ? 120 : 120;
         InternalTimer(gettimeofday() + $watchdog_timeout, "Mammotion_WatchdogReset", $hash, 0);
     }
