@@ -4,7 +4,7 @@ Mammotion Cloud API Helper fuer FHEM
 Aufruf: mammotion_helper.py <account> <password> <action> [params...] [--app-version <ver>] [-v]
 
 Optionen:
-  --app-version <ver>   App-Version-Header fuer den Login (Default: NOT HA,2.3.4.22)
+  --app-version <ver>   App-Version-Header fuer den Login (Default: leer = pymammotion-Default)
   -v / --verbose        Debug-Logging auf stderr
 
 Aktionen (nur HTTP):
@@ -31,11 +31,13 @@ import asyncio
 import logging
 
 
-# Mammotion lehnt veraltete App-Version-Header beim Login ab: der Server
-# antwortet dann mit HTTP 200 ohne Token-JSON, was in pymammotion zu
-# "Attempt to decode JSON with unexpected mimetype" fuehrt. Aktuelle App-Version
-# laut pymammotion-Konstante. Per FHEM-Attribut "app_version" ueberschreibbar.
-DEFAULT_APP_VERSION = "NOT HA,2.3.4.22"
+# Optionaler Override fuer den App-Version-Header beim Login. Mammotion kann
+# veraltete App-Versionen ablehnen (HTTP 200 ohne Token-JSON -> "Attempt to
+# decode JSON with unexpected mimetype"). Standard: leer = keine Aenderung,
+# es wird die App-Version der installierten pymammotion-Version verwendet.
+# Per FHEM-Attribut "app_version" setzbar, z.B. "Home Assistant,2.3.4.22"
+# oder "NOT HA,2.3.4.22".
+DEFAULT_APP_VERSION = ""
 
 
 def _patch_app_version(app_version):
