@@ -28,6 +28,7 @@ Aktionen (MQTT):
 """
 
 import sys
+import os
 import json
 import asyncio
 import logging
@@ -35,7 +36,7 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.2"
+HELPER_VERSION = "1.7.3"
 
 
 # Optionaler Override fuer den App-Version-Header beim Login. Mammotion kann
@@ -529,11 +530,40 @@ if __name__ == "__main__":
     action   = argv[2]
     params   = argv[3:] if len(argv) > 3 else []
 
+    # Gesamt-Zeitbudget je Aktion (unter dem FHEM-BlockingCall-Timeout).
+    if action == "get_zones":
+        overall = 210
+    elif action in ("start_zone", "get_tasks", "start_task"):
+        overall = 160
+    elif action == "get_status":
+        overall = 75
+    else:
+        overall = 70
+
+    # Eigene Event-Loop statt asyncio.run(): nach dem Ergebnis hart beenden
+    # (os._exit), damit das Loop-Shutdown nicht an haengenden pymammotion-
+    # Hintergrund-Tasks (MQTT-Loops/Transport-Reconnect nach dem Map-Sync)
+    # blockiert -> sonst harter BlockingCall-Kill ohne Ergebnis.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        result = asyncio.run(run(account, password, action, params, app_version, legacy_login))
-        print(json.dumps(result))
-        sys.exit(0)
+        result = loop.run_until_complete(
+            asyncio.wait_for(
+                run(account, password, action, params, app_version, legacy_login),
+                timeout=overall,
+            )
+        )
+    except asyncio.TimeoutError:
+        result = {"ok": False, "error": "Zeitueberschreitung bei Aktion {} (Cloud nicht rechtzeitig erreichbar)".format(action)}
     except Exception as e:
-        err = str(e).replace("'", "").replace('"', '')
-        print(json.dumps({"ok": False, "error": err}))
-        sys.exit(1)
+        err = " ".join(str(e).split()).replace("'", " ").replace('"', " ").replace("\\", " ")
+        result = {"ok": False, "error": err[:300] or "Unbekannter Fehler"}
+
+    try:
+        sys.stdout.write(json.dumps(result) + "\n")
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    # Harter Sofort-Exit ohne Loop-/Task-Cleanup (verhindert Shutdown-Hang).
+    os._exit(0)
