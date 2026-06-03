@@ -36,7 +36,17 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.9"
+HELPER_VERSION = "1.7.10"
+
+# Nach einem Kommando (MQTT-Publish) MUESSEN wir kurz warten, BEVOR der Prozess
+# per os._exit() hart beendet wird. send_command_with_args() reiht die Nachricht
+# nur in die MQTT-Sende-Queue ein; die eigentliche TCP-Uebertragung an den Broker
+# laeuft im Hintergrund-Loop. Beenden wir den Prozess sofort, wird der Socket-
+# Puffer verworfen und das Geraet erhaelt das Kommando NIE (Cloud quittiert zwar
+# mit SUCCESS, der Roboter faehrt aber nicht los). Lese-Aktionen (get_zones/
+# get_status) waren davon nie betroffen, weil sie nach dem Senden ohnehin lange
+# pollen und der Publish dabei rausgeht.
+POST_SEND_SETTLE = 6
 
 
 # Wird von get_zones gesetzt: Funktion, die die aktuell bekannten Zonen aus dem
@@ -240,30 +250,37 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
 
         if action == "start_mowing":
             await send(device_name, "start_job")
+            await asyncio.sleep(POST_SEND_SETTLE)
             return {"ok": True, "action": action}
 
         elif action == "stop_mowing":
             await send(device_name, "cancel_job")
+            await asyncio.sleep(POST_SEND_SETTLE)
             return {"ok": True, "action": action}
 
         elif action == "pause_mowing":
             await send(device_name, "pause_execute_task")
+            await asyncio.sleep(POST_SEND_SETTLE)
             return {"ok": True, "action": action}
 
         elif action == "resume_mowing":
             await send(device_name, "resume_execute_task")
+            await asyncio.sleep(POST_SEND_SETTLE)
             return {"ok": True, "action": action}
 
         elif action == "return_home":
             await send(device_name, "return_to_dock")
+            await asyncio.sleep(POST_SEND_SETTLE)
             return {"ok": True, "action": action}
 
         elif action == "leave_dock":
             await send(device_name, "leave_dock")
+            await asyncio.sleep(POST_SEND_SETTLE)
             return {"ok": True, "action": action}
 
         elif action == "along_border":
             await send(device_name, "along_border")
+            await asyncio.sleep(POST_SEND_SETTLE)
             return {"ok": True, "action": action}
 
         elif action == "get_zones":
@@ -387,6 +404,8 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 )
                 await asyncio.sleep(2)
                 await send(device_name, "start_job")
+            # Publish des start_job flushen lassen, bevor der Prozess exitet.
+            await asyncio.sleep(POST_SEND_SETTLE)
             return {"ok": True, "action": "start_zone", "zone_hash": zone_hash}
 
         elif action == "get_tasks":
@@ -444,6 +463,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 device_name, "single_schedule",
                 plan_id=plan_id
             )
+            await asyncio.sleep(POST_SEND_SETTLE)
             return {"ok": True, "action": "start_task", "plan_id": plan_id}
 
         elif action == "get_status":
