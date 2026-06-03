@@ -33,6 +33,11 @@ import asyncio
 import logging
 
 
+# Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
+# FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
+HELPER_VERSION = "1.7.2"
+
+
 # Optionaler Override fuer den App-Version-Header beim Login. Mammotion kann
 # veraltete App-Versionen ablehnen (HTTP 200 ohne Token-JSON -> "Attempt to
 # decode JSON with unexpected mimetype"). Standard: leer = keine Aenderung,
@@ -240,18 +245,15 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             return {"ok": True, "action": action}
 
         elif action == "get_zones":
-            # Map-Sync zeitlich begrenzen: in der neuen API wartet start_map_sync
-            # auf die (teils langsame/haengende) Saga. wait_for verhindert den
-            # harten BlockingCall-Kill -> sauberer Abschluss + stop().
-            try:
-                await asyncio.wait_for(map_sync(device_name), timeout=120)
-            except asyncio.TimeoutError:
-                pass
-            except Exception:
-                pass
+            # Map-Sync NICHT blockierend abwarten: in der neuen API wartet
+            # start_map_sync auf die MapFetchSaga, die ueber die Cloud teils
+            # nicht/zu langsam durchkommt (-> frueher harter BlockingCall-Kill).
+            # Stattdessen Saga als Hintergrund-Task starten und nur den
+            # Geraete-State pollen (die Saga fuellt device.map.area inkrementell,
+            # waehrend wir schlafen). So bleibt die Laufzeit hart begrenzt.
+            sync_task = asyncio.ensure_future(map_sync(device_name))
 
-            # Kurze Stabilisierung (alte API liefert Daten asynchron nach).
-            wait_max = 30
+            wait_max = 90
             wait_step = 3
             waited = 0
             stable_count = 0
@@ -259,6 +261,8 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             last_zone_count = -1
 
             while waited < wait_max:
+                await asyncio.sleep(wait_step)
+                waited += wait_step
                 mower = get_state(device_name)
                 area_map = getattr(getattr(mower, "map", None), "area", {}) or {} if mower else {}
                 current_count = len(area_map)
@@ -269,8 +273,15 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 else:
                     stable_count = 0
                 last_zone_count = current_count
-                await asyncio.sleep(wait_step)
-                waited += wait_step
+
+            # Hintergrund-Task best effort beenden. CancelledError ist eine
+            # BaseException (nicht Exception) -> breit abfangen.
+            if not sync_task.done():
+                sync_task.cancel()
+            try:
+                await asyncio.wait_for(sync_task, timeout=1)
+            except BaseException:
+                pass
 
             mower = get_state(device_name)
             if mower is None:
@@ -504,6 +515,10 @@ if __name__ == "__main__":
         logging.basicConfig(level=logging.DEBUG, force=True)
     else:
         logging.basicConfig(level=logging.WARNING)
+
+    # Versionskennung ins stderr (im FHEM-Log unter "Python stderr" sichtbar).
+    sys.stderr.write("mammotion_helper version {}\n".format(HELPER_VERSION))
+    sys.stderr.flush()
 
     if len(argv) < 3:
         print(json.dumps({"ok": False, "error": "Usage: mammotion_helper.py <account> <password> <action> [params...] [--app-version <ver>] [--legacy-login] [-v]"}))
