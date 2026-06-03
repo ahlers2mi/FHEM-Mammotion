@@ -1,2 +1,2 @@
-UPD 2026-06-03_11:55:53 36542 FHEM/98_Mammotion.pm
-UPD 2026-06-03_11:55:53 21941 FHEM/mammotion_helper.py
+UPD 2026-06-03_12:00:50 36542 FHEM/98_Mammotion.pm
+UPD 2026-06-03_12:00:50 21941 FHEM/mammotion_helper.py
