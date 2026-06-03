@@ -36,7 +36,7 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.8"
+HELPER_VERSION = "1.7.9"
 
 
 # Wird von get_zones gesetzt: Funktion, die die aktuell bekannten Zonen aus dem
@@ -190,6 +190,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
         plan_sync = client.start_plan_sync
         stop      = client.stop
         send      = client.send_command_with_args
+        mow_path  = client.start_mow_path_saga
     else:
         # Alte API: get_ssl_context() laedt die CA nicht korrekt
         # (-> CERTIFICATE_VERIFY_FAILED), daher synchron nachladen.
@@ -220,6 +221,8 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 await _m.send_command_with_args(name, key, **kwargs)
             else:
                 await _m.send_command(name, key)
+
+        mow_path = None  # start_mow_path_saga gibt es nur in der neuen API
 
     try:
         try:
@@ -361,12 +364,29 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 path_order="",
             )
 
-            await send(
-                device_name, "generate_route_information",
-                generate_route_information=route_info
-            )
-            await asyncio.sleep(2)
-            await send(device_name, "start_job")
+            if mow_path is not None:
+                # Neue API: korrekter Ablauf wie die App -- die MowPathSaga
+                # generiert die Route UND sammelt/bestaetigt die Maehbahn-Frames
+                # (cover_path_upload), erst damit ist der Job "committet".
+                # Erst danach start_job. (generate_route_information + start_job
+                # allein laesst das Geraet planen, aber NICHT losfahren.)
+                try:
+                    await asyncio.wait_for(
+                        mow_path(device_name, [zone_hash], route_info=route_info),
+                        timeout=120,
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+                await send(device_name, "start_job")
+            else:
+                # Alte API: Best-effort (kein MowPathSaga verfuegbar).
+                await send(
+                    device_name, "generate_route_information",
+                    generate_route_information=route_info
+                )
+                await asyncio.sleep(2)
+                await send(device_name, "start_job")
             return {"ok": True, "action": "start_zone", "zone_hash": zone_hash}
 
         elif action == "get_tasks":
