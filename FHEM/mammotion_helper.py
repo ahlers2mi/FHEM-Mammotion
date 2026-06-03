@@ -36,7 +36,7 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.3"
+HELPER_VERSION = "1.7.4"
 
 
 # Optionaler Override fuer den App-Version-Header beim Login. Mammotion kann
@@ -530,27 +530,47 @@ if __name__ == "__main__":
     action   = argv[2]
     params   = argv[3:] if len(argv) > 3 else []
 
-    # Gesamt-Zeitbudget je Aktion (unter dem FHEM-BlockingCall-Timeout).
-    if action == "get_zones":
-        overall = 210
-    elif action in ("start_zone", "get_tasks", "start_task"):
-        overall = 160
-    elif action == "get_status":
-        overall = 75
-    else:
-        overall = 70
+    # Gesamt-Zeitbudget je Aktion (jeweils unter dem FHEM-BlockingCall-Timeout).
+    # wf = asyncio-Timeout (sauberer Abbruch, falls Cancellation greift),
+    # wd = harte Watchdog-Frist (Prozess-Exit, falls der Loop trotzdem haengt).
+    _budget = {
+        "get_zones":  (180, 200),
+        "start_zone": (140, 160),
+        "get_tasks":  (140, 160),
+        "start_task": (140, 160),
+        "get_status": (70, 80),
+    }
+    wf, wd = _budget.get(action, (50, 55))
+
+    # Watchdog-Thread: garantiert den Prozess-Exit nach wd Sekunden, UNABHAENGIG
+    # vom Event-Loop. Noetig, weil pymammotion-Hintergrund-Tasks (MQTT/Transport)
+    # die Cancellation verschlucken koennen -> loop.run_until_complete kehrt sonst
+    # nie zurueck und os._exit unten wird nie erreicht (-> harter FHEM-Kill).
+    import threading
+    import time as _time
+
+    def _watchdog():
+        _time.sleep(wd)
+        try:
+            sys.stdout.write(json.dumps({"ok": False, "error": "Zeitueberschreitung bei Aktion {} (Watchdog)".format(action)}) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=_watchdog, daemon=True).start()
 
     # Eigene Event-Loop statt asyncio.run(): nach dem Ergebnis hart beenden
     # (os._exit), damit das Loop-Shutdown nicht an haengenden pymammotion-
     # Hintergrund-Tasks (MQTT-Loops/Transport-Reconnect nach dem Map-Sync)
-    # blockiert -> sonst harter BlockingCall-Kill ohne Ergebnis.
+    # blockiert.
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         result = loop.run_until_complete(
             asyncio.wait_for(
                 run(account, password, action, params, app_version, legacy_login),
-                timeout=overall,
+                timeout=wf,
             )
         )
     except asyncio.TimeoutError:
