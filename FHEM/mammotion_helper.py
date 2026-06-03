@@ -103,68 +103,56 @@ async def get_devices(http):
 
 
 async def mqtt_action(account, password, device_name, iot_id, action, extra_params=None):
-    # Bugfix for pymammotion: get_ssl_context() does not await run_in_executor(),
-    # so CA certificates are never loaded -> CERTIFICATE_VERIFY_FAILED.
-    # Patch: load CA certificates synchronously.
-    import ssl as _ssl
-    from pymammotion.mqtt import aliyun_mqtt as _aliyun_mod
+    # 0.7.133-API: MammotionClient statt der alten Mammotion-Klasse.
+    # Der frueher noetige SSL/CA-Patch (get_ssl_context) entfaellt -- der Bug
+    # ist in aktuellen pymammotion-Versionen behoben.
+    from pymammotion.client import MammotionClient
 
-    async def _fixed_get_ssl_context():
-        context = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
-        context.options |= _ssl.OP_IGNORE_UNEXPECTED_EOF
-        context.load_verify_locations(cadata=_aliyun_mod._ALIYUN_BROKER_CA_DATA)
-        return context
-
-    _aliyun_mod.AliyunMQTT.get_ssl_context = staticmethod(_fixed_get_ssl_context)
-
-    from pymammotion.mammotion.devices.mammotion import Mammotion
-
-    Mammotion._instance = None
-    mammotion = Mammotion()
+    client = MammotionClient()
     try:
-        await mammotion.login_and_initiate_cloud(account, password)
-    except Exception as e:
-        err = " ".join(str(e).split())
-        err = err.replace("'", " ").replace('"', " ").replace("\\", " ")
-        return {"ok": False, "error": "Login fehlgeschlagen: {}".format(err[:300])}
-    await asyncio.sleep(5)
+        try:
+            await client.login_and_initiate_cloud(account, password)
+        except Exception as e:
+            err = " ".join(str(e).split())
+            err = err.replace("'", " ").replace('"', " ").replace("\\", " ")
+            return {"ok": False, "error": "Login fehlgeschlagen: {}".format(err[:300])}
 
-    try:
-        device = mammotion.get_device_by_name(device_name)
-    except (KeyError, Exception) as e:
-        return {"ok": False, "error": "Device not found: {}".format(str(e).replace("'", ""))}
+        # Kurz warten, bis die MQTT-Transport-Verbindung steht.
+        await asyncio.sleep(5)
 
-    try:
+        if client.get_device_by_name(device_name) is None:
+            return {"ok": False, "error": "Geraet nicht gefunden: {}".format(device_name)}
+
         if action == "start_mowing":
-            await mammotion.send_command(device_name, "start_job")
+            await client.send_command_with_args(device_name, "start_job")
             return {"ok": True, "action": action}
 
         elif action == "stop_mowing":
-            await mammotion.send_command(device_name, "cancel_job")
+            await client.send_command_with_args(device_name, "cancel_job")
             return {"ok": True, "action": action}
 
         elif action == "pause_mowing":
-            await mammotion.send_command(device_name, "pause_execute_task")
+            await client.send_command_with_args(device_name, "pause_execute_task")
             return {"ok": True, "action": action}
 
         elif action == "resume_mowing":
-            await mammotion.send_command(device_name, "resume_execute_task")
+            await client.send_command_with_args(device_name, "resume_execute_task")
             return {"ok": True, "action": action}
 
         elif action == "return_home":
-            await mammotion.send_command(device_name, "return_to_dock")
+            await client.send_command_with_args(device_name, "return_to_dock")
             return {"ok": True, "action": action}
 
         elif action == "leave_dock":
-            await mammotion.send_command(device_name, "leave_dock")
+            await client.send_command_with_args(device_name, "leave_dock")
             return {"ok": True, "action": action}
 
         elif action == "along_border":
-            await mammotion.send_command(device_name, "along_border")
+            await client.send_command_with_args(device_name, "along_border")
             return {"ok": True, "action": action}
 
         elif action == "get_zones":
-            await mammotion.start_map_sync(device_name)
+            await client.start_map_sync(device_name)
 
             # Wait until zone count is stable (all MQTT packets received)
             wait_max = 90
@@ -177,7 +165,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             while waited < wait_max:
                 await asyncio.sleep(wait_step)
                 waited += wait_step
-                mower = mammotion.mower(device_name)
+                mower = client.get_device_by_name(device_name)
                 if mower is None:
                     stable_count = 0
                     last_zone_count = -1
@@ -192,7 +180,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                     stable_count = 0
                 last_zone_count = current_count
 
-            mower = mammotion.mower(device_name)
+            mower = client.get_device_by_name(device_name)
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
@@ -216,7 +204,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 return {"ok": False, "error": "zone_hash parameter required"}
             zone_hash = int(extra_params[0])
 
-            from pymammotion.data.model import GenerateRouteInformation
+            from pymammotion.data.model.generate_route_information import GenerateRouteInformation
 
             route_info = GenerateRouteInformation(
                 one_hashs=[zone_hash],
@@ -233,17 +221,17 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 path_order="",
             )
 
-            await mammotion.send_command_with_args(
+            await client.send_command_with_args(
                 device_name, "generate_route_information",
                 generate_route_information=route_info
             )
             await asyncio.sleep(2)
-            await mammotion.send_command(device_name, "start_job")
+            await client.send_command_with_args(device_name, "start_job")
             return {"ok": True, "action": "start_zone", "zone_hash": zone_hash}
 
         elif action == "get_tasks":
-            # Plans/Tasks need start_schedule_sync, not start_map_sync
-            await mammotion.start_schedule_sync(device_name)
+            # Plaene/Tasks via start_plan_sync (nicht start_map_sync)
+            await client.start_plan_sync(device_name)
 
             # Wait until all plans have arrived (plan count == total_plan_num)
             wait_max = 90
@@ -253,7 +241,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
             while waited < wait_max:
                 await asyncio.sleep(wait_step)
                 waited += wait_step
-                mower = mammotion.mower(device_name)
+                mower = client.get_device_by_name(device_name)
                 if mower is None:
                     continue
                 plan_map = getattr(getattr(mower, "map", None), "plan", {}) or {}
@@ -263,7 +251,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                     if total > 0 and len(plan_map) >= total:
                         break  # all plans received
 
-            mower = mammotion.mower(device_name)
+            mower = client.get_device_by_name(device_name)
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
@@ -287,17 +275,17 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 return {"ok": False, "error": "plan_id parameter required"}
             plan_id = extra_params[0]
 
-            await mammotion.send_command_with_args(
+            await client.send_command_with_args(
                 device_name, "single_schedule",
                 plan_id=plan_id
             )
             return {"ok": True, "action": "start_task", "plan_id": plan_id}
 
         elif action == "get_status":
-            await mammotion.send_command(device_name, "get_report_cfg")
+            await client.send_command_with_args(device_name, "get_report_cfg")
             await asyncio.sleep(5)
 
-            mower = mammotion.mower(device_name)
+            mower = client.get_device_by_name(device_name)
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
@@ -328,7 +316,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
 
     finally:
         try:
-            await mammotion.stop()
+            await client.stop()
         except Exception:
             pass
 
