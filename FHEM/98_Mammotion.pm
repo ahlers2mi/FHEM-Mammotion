@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.7.11";
+my $MODULE_VERSION = "1.8.0";
 
 my %sets = (
     "update"       => "noArg",
@@ -61,6 +61,7 @@ sub Mammotion_Initialize {
                       . "helper_script "
                       . "app_version "
                       . "legacy_login:0,1 "
+                      . "idleAlertHours "
                       . $readingFnAttributes;
     $hash->{MODULE_VERSION} = $MODULE_VERSION;
 
@@ -827,16 +828,61 @@ sub Mammotion_ProcessStatus {
     );
     my $work_text = $work_texts{$work_state} // "unbekannt ($work_state)";
 
+    # Aktivitaet nachhalten. Die API sagt nur, WAS der Maeher gerade tut -
+    # nicht seit wann und nicht, wann er zuletzt gemaeht hat. Genau das fehlt,
+    # wenn er nach Regen in "pausiert" stehen bleibt und tagelang nichts tut:
+    # kein Fehler, Akku 100 %, work_state unauffaellig. Vorher: zweimal 3,5 Tage
+    # "pausiert" (19.-23.08. und 29.08.-01.09.), ohne dass irgendetwas darauf
+    # hingewiesen haette. Darum:
+    #   work_state_since  Zeitpunkt des letzten Zustandswechsels
+    #   last_mowing       zuletzt beim Maehen gesehen (13 maeht, 20 manuell)
+    #   idle_hours        Stunden seit last_mowing, je Poll neu (numerisch,
+    #                     fuer Schwellwerte: FHEMVIZ vizAlert idle_hours>=48)
+    #   idle_alert        Klartext, sobald idle_hours >= attr idleAlertHours
+    #                     (Standard 48, 0 = aus), sonst leer - fuer die
+    #                     Hinweis-Leiste und als Notify-Ausloeser.
+    # Achtung Polling: mit interval 600 wird ein Maehlauf unter 10 Minuten
+    # nicht zwingend gesehen. Ohne bekanntes last_mowing zaehlt die Zeit ab
+    # dem ersten Poll - lieber ein spaeter Hinweis als gar keiner.
+    my $now        = time();
+    my $prev_state = ReadingsVal($name, "work_state", "");
+    my $mowing     = ($work_state == 13 || $work_state == 20) ? 1 : 0;
+    my $last_mow   = ReadingsVal($name, "last_mowing", "");
+    $last_mow = FmtDateTime($now) if ($mowing || $last_mow eq "");
+    my $idle_h = ($now - time_str2num($last_mow)) / 3600;
+    $idle_h = 0 if ($idle_h < 0);
+    my $limit = AttrVal($name, "idleAlertHours", 48);
+    my $alert = "";
+    if (!$mowing && $limit > 0 && $idle_h >= $limit) {
+        $alert = sprintf("seit %s nicht gem\xc3\xa4ht (%s)",
+                         Mammotion_Dauer($now - time_str2num($last_mow)), $work_text);
+    }
+
     readingsBeginUpdate($hash);
     readingsBulkUpdate($hash, "battery",      $battery);
     readingsBulkUpdate($hash, "charge_state", $charge_text);
     readingsBulkUpdate($hash, "work_state",   $work_text);
+    readingsBulkUpdate($hash, "work_state_since", FmtDateTime($now))
+        if ($work_text ne $prev_state || ReadingsVal($name, "work_state_since", "") eq "");
+    readingsBulkUpdate($hash, "last_mowing",  $last_mow);
+    readingsBulkUpdate($hash, "idle_hours",   sprintf("%.1f", $idle_h));
+    readingsBulkUpdate($hash, "idle_alert",   $alert);
     readingsBulkUpdate($hash, "last_update",  $timestamp);
     readingsBulkUpdate($hash, "last_error",   "");
     readingsBulkUpdate($hash, "state",        "online");
     readingsEndUpdate($hash, 1);
 
-    Log3($name, 4, "[$name] Status: Akku=$battery%, Arbeit=$work_text, Laden=$charge_text");
+    Log3($name, 4, "[$name] Status: Akku=$battery%, Arbeit=$work_text, Laden=$charge_text, "
+                 . sprintf("seit %.1f h nicht gemaeht", $idle_h) . ($alert ? " -> HINWEIS" : ""));
+}
+
+# Sekunden -> "35 min" / "7 Std." / "3 Tagen" (Dativ, weil es hinter "seit" steht).
+sub Mammotion_Dauer {
+    my ($sek) = @_;
+    $sek = 0 if ($sek < 0);
+    return sprintf("%d min", int($sek / 60 + 0.5))        if ($sek < 3600);
+    return sprintf("%d Std.", int($sek / 3600 + 0.5))     if ($sek < 48 * 3600);
+    return sprintf("%d Tagen", int($sek / 86400 + 0.5));
 }
 
 sub Mammotion_ProcessDevices {
@@ -1015,7 +1061,29 @@ sub Mammotion_WatchdogReset {
       <code>authorization_code</code> separat nachgeladen. Hilft, wenn der Cloud-Login
       mit <code>Account or password mismatch</code> scheitert, obwohl die
       Zugangsdaten korrekt sind (die Geraeteliste also funktioniert).</li>
+    <li><code>idleAlertHours &lt;stunden&gt;</code> - Ab so vielen Stunden ohne
+      Maehen wird das Reading <code>idle_alert</code> gefuellt (Standard 48,
+      <code>0</code> = aus). Gedacht fuer den Fall, dass der Maeher nach Regen
+      in <code>pausiert</code> stehen bleibt und tagelang nichts tut - ohne
+      Fehler, mit vollem Akku.</li>
+  </ul><br>
+
+  <b>Readings zur Aktivitaet</b> (ab 1.8.0, je Status-Abfrage neu):<br>
+  <ul>
+    <li><code>work_state_since</code> - Zeitpunkt des letzten Zustandswechsels
+      von <code>work_state</code></li>
+    <li><code>last_mowing</code> - wann der Maeher zuletzt beim Maehen gesehen
+      wurde (<code>maeht</code> oder <code>manuelles_m&auml;hen</code>). Ohne
+      bekannten Wert zaehlt die Zeit ab der ersten Abfrage.</li>
+    <li><code>idle_hours</code> - Stunden seit <code>last_mowing</code>, numerisch
+      (z. B. FHEMVIZ: <code>attr &lt;name&gt; vizAlert idle_hours&gt;=48</code>)</li>
+    <li><code>idle_alert</code> - Klartext wie <code>seit 3 Tagen nicht gem&auml;ht
+      (pausiert)</code>, sobald <code>idle_hours</code> die Schwelle
+      <code>idleAlertHours</code> erreicht; sonst leer. Als Ausloeser fuer ein
+      Notify: <code>define n_maeher notify &lt;name&gt;:idle_alert:.+ ...</code></li>
   </ul>
+  Hinweis: das Polling-Intervall bestimmt, wie fein Maehen erkannt wird - mit
+  <code>interval 600</code> kann ein Maehlauf unter 10 Minuten unbemerkt bleiben.
 </ul>
 
 =end html
