@@ -10,6 +10,10 @@ FHEM-Modul zur Anbindung von Mammotion Rasenmähern (Luba, Yuka u.a.) über die 
 - 📍 Bestimmte Zone oder Aufgabe per Name oder Hash/ID starten
 - 🔄 Automatisches Polling (konfigurierbares Intervall)
 - 🔋 Akkustand, Arbeits- und Ladestatus als FHEM-Readings
+- ⏱️ Aktivität nachgehalten: `last_mowing`, `idle_hours`, `work_state_since` und
+  ein Klartext-Hinweis `idle_alert`, sobald der Mäher länger als
+  `idleAlertHours` (Standard 48 h) nicht gemäht hat – etwa weil er nach Regen
+  in `pausiert` stehen geblieben ist
 - 🛡️ Watchdog: hängende Python-Prozesse werden automatisch beendet
 
 ## Voraussetzungen
@@ -320,3 +324,18 @@ einen Watchdog selbstständig.
 ## Lizenz
 
 Dieses Modul ist ein Community-Beitrag und steht unter der [GNU General Public License v2](https://www.gnu.org/licenses/gpl-2.0.html), entsprechend der FHEM-Lizenz.
+
+## Tests
+
+Unter `t/` liegen Szenario-Tests für die Aktivitäts-Readings, die **ohne
+FHEM-Installation und ohne Python** laufen:
+
+```bash
+perl t/run.pl
+```
+
+`t/FhemStub.pm` ist eine FHEM-Attrappe mit **virtueller Uhr** – drei Tage
+„pausiert" sind ein Aufruf. Geprüft wird der Fall, um den es geht: der Mäher
+bleibt nach Regen stehen, Akku voll, kein Fehler, und nach 48 Stunden steht
+`idle_alert` auf „seit 2 Tagen nicht gemäht (pausiert)". Gegen die Fassung
+ohne diese Readings werden die Tests rot (8 von 34).
