@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.9.0";
+my $MODULE_VERSION = "1.9.1";
 
 my %sets = (
     "update"       => "noArg",
@@ -62,6 +62,7 @@ sub Mammotion_Initialize {
                       . "app_version "
                       . "legacy_login:0,1 "
                       . "idleAlertHours "
+                      . "pauseAlertMinutes "
                       . $readingFnAttributes;
     $hash->{MODULE_VERSION} = $MODULE_VERSION;
 
@@ -104,6 +105,10 @@ sub Mammotion_Define {
         readingsSingleUpdate($hash, "state", "disabled", 1);
         Log3($name, 3, "[$name] Modul ist deaktiviert (disable=1), Timer wird nicht gestartet.");
     } else {
+        # Vorhandenen Timer entfernen: Define laeuft bei reload/modify erneut,
+        # sonst entsteht je reload eine weitere Abruf-Kette (31.10.2026: 3 Abrufe
+        # je 10 min statt einem).
+        RemoveInternalTimer($hash, "Mammotion_UpdateTimer");
         InternalTimer(gettimeofday() + 30, "Mammotion_UpdateTimer", $hash, 0);
         readingsSingleUpdate($hash, "state", "initialized", 1);
     }
@@ -480,6 +485,7 @@ sub Mammotion_UpdateTimer {
     Mammotion_FetchDevices($hash);
 
     my $interval = AttrVal($name, "interval", $hash->{INTERVAL} // 300);
+    RemoveInternalTimer($hash, "Mammotion_UpdateTimer");
     InternalTimer(gettimeofday() + $interval, "Mammotion_UpdateTimer", $hash, 0);
 }
 
@@ -888,6 +894,22 @@ sub Mammotion_ProcessStatus {
                          Mammotion_Dauer($now - time_str2num($last_mow)), $work_text);
     }
 
+    # Pausiert draussen (nicht in der Station): z. B. Abladestelle nicht
+    # erreichbar (Fehler 1215, 31.10.2026) - der Fehlercode selbst kommt beim
+    # kurzen Polling nicht an, der Zustand schon. pause_alert wird Klartext,
+    # sobald "pausiert" + "nicht laden" laenger als attr pauseAlertMinutes
+    # (Standard 15, 0 = aus) anhaelt; sonst leer.
+    my $since_num = ($work_text ne $prev_state || ReadingsVal($name, "work_state_since", "") eq "")
+                  ? $now : time_str2num(ReadingsVal($name, "work_state_since", FmtDateTime($now)));
+    my $p_limit = AttrVal($name, "pauseAlertMinutes", 15);
+    my $p_alert = "";
+    if ($work_state == 19 && $charge_state == 0 && $p_limit > 0
+        && ($now - $since_num) >= $p_limit * 60) {
+        my $bat_txt = defined($battery) ? $battery : ReadingsVal($name, "battery", "?");
+        $p_alert = sprintf("steht seit %s pausiert drau\xc3\x9fen (Akku %s %%)",
+                           Mammotion_Dauer($now - $since_num), $bat_txt);
+    }
+
     readingsBeginUpdate($hash);
     readingsBulkUpdate($hash, "battery",      $battery) if (defined($battery));
     readingsBulkUpdate($hash, "charge_state", $charge_text);
@@ -897,6 +919,7 @@ sub Mammotion_ProcessStatus {
     readingsBulkUpdate($hash, "last_mowing",  $last_mow);
     readingsBulkUpdate($hash, "idle_hours",   sprintf("%.1f", $idle_h));
     readingsBulkUpdate($hash, "idle_alert",   $alert);
+    readingsBulkUpdate($hash, "pause_alert",  $p_alert);
 
     # Zusatzinfos ab Helper 1.8.0 / pymammotion 0.10.x - nur wenn geliefert.
     if (defined($data->{last_status})) {
@@ -1165,6 +1188,9 @@ sub Mammotion_WatchdogReset {
       <code>authorization_code</code> separat nachgeladen. Hilft, wenn der Cloud-Login
       mit <code>Account or password mismatch</code> scheitert, obwohl die
       Zugangsdaten korrekt sind (die Geraeteliste also funktioniert).</li>
+    <li><code>pauseAlertMinutes &lt;minuten&gt;</code> - Ab so vielen Minuten
+      "pausiert" ausserhalb der Station (Laden "nicht laden") wird
+      <code>pause_alert</code> gesetzt. Standard 15, 0 = aus.</li>
     <li><code>idleAlertHours &lt;stunden&gt;</code> - Ab so vielen Stunden ohne
       Maehen wird das Reading <code>idle_alert</code> gefuellt (Standard 48,
       <code>0</code> = aus). Gedacht fuer den Fall, dass der Maeher nach Regen
@@ -1204,6 +1230,10 @@ sub Mammotion_WatchdogReset {
       Auftrags. Der Maeher meldet das nur einmal am Auftragsende; bei kurzem
       Polling wird es nicht zwingend gesehen.</li>
   </ul>
+  <b>pause_alert</b> (ab 1.9.1) - Klartext wie <code>steht seit 35 min pausiert
+  drau&szlig;en (Akku 87 %)</code>, sobald der Maeher laenger als
+  <code>pauseAlertMinutes</code> pausiert und nicht laedt (z. B. Abladestelle nicht
+  erreichbar); sonst leer. Fuer FHEMVIZ: <code>vizAlert pause_alert!=</code>.<br>
   Kommt der Statusreport innerhalb von 15 s nicht an, bleiben alle Werte
   unveraendert (Log Stufe 3 "kein Report") - frueher kamen dann Akku 0 und
   "nicht aktiv".

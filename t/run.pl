@@ -171,5 +171,22 @@ Mammotion_ProcessStatus($defs{$name}, { work_state => 11, battery => 63, charge_
 is(rd("block_reason"), "", "0 = keine Sperre");
 is(rd("error_codes"), "1234", "ohne error_codes im Datensatz bleibt der alte Wert");
 
+print "# 12. pause_alert: pausiert draussen\n";
+neu(); $NOW = 1_756_800_000;
+Mammotion_ProcessStatus($defs{$name}, { work_state => 13, battery => 90, charge_state => 0 }, FmtDateTime($NOW));
+std(0.05); Mammotion_ProcessStatus($defs{$name}, { work_state => 19, battery => 88, charge_state => 0 }, FmtDateTime($NOW));
+is(rd("pause_alert"), "", "gerade erst pausiert: kein Hinweis");
+std(0.5); Mammotion_ProcessStatus($defs{$name}, { work_state => 19, battery => 87, charge_state => 0 }, FmtDateTime($NOW));
+like(rd("pause_alert"), qr/^steht seit 30 min pausiert drau.{1,2}en \(Akku 87 %\)$/, "nach 30 min Hinweis");
+Mammotion_ProcessStatus($defs{$name}, { work_state => 19, battery => 87, charge_state => 1 }, FmtDateTime($NOW));
+is(rd("pause_alert"), "", "pausiert aber laedt (Station): kein Hinweis");
+Mammotion_ProcessStatus($defs{$name}, { work_state => 19, battery => 87, charge_state => 0 }, FmtDateTime($NOW));
+$attr{$name}{pauseAlertMinutes} = 0;
+Mammotion_ProcessStatus($defs{$name}, { work_state => 19, battery => 87, charge_state => 0 }, FmtDateTime($NOW));
+is(rd("pause_alert"), "", "pauseAlertMinutes 0 = aus");
+$attr{$name}{pauseAlertMinutes} = 15;
+Mammotion_ProcessStatus($defs{$name}, { work_state => 11, battery => 87, charge_state => 0 }, FmtDateTime($NOW));
+is(rd("pause_alert"), "", "anderer Zustand loescht den Hinweis");
+
 print "\n$ok ok, $nok fehlgeschlagen\n";
 exit($nok ? 1 : 0);
