@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.8.0";
+my $MODULE_VERSION = "1.8.1";
 
 my %sets = (
     "update"       => "noArg",
@@ -794,8 +794,25 @@ sub Mammotion_ProcessStatus {
     my $name = $hash->{NAME};
 
     my $charge_state = $data->{charge_state} // 0;
-    my $battery      = $data->{battery}      // 0;
+#   my $battery      = $data->{battery}      // 0;
+    my $battery      = $data->{battery};
     my $work_state   = $data->{work_state}   // 0;
+
+    # Akku 0 % nur glauben, wenn der Maeher auch einen Arbeitszustand meldet.
+    # Die Cloud liefert zwischendurch leere Datensaetze (battery 0, work_state 0
+    # "nicht aktiv", charge_state 0) - am 31.10.2026 beim Maehen alle ~30 min,
+    # jedes Mal mit falscher "Batterie 0 Prozent"-Warnung. Fehlt battery oder
+    # kommt 0 zusammen mit work_state 0, bleibt der letzte gueltige Wert stehen.
+    my $battery_raw = defined($battery) ? $battery : "(fehlt)";
+    if (!defined($battery) || ($battery == 0 && $work_state == 0)) {
+        my $last = ReadingsVal($name, "battery", "");
+        if ($last ne "") {
+            Log3($name, 4, "[$name] Akku=$battery_raw ohne Arbeitszustand verworfen, behalte $last%");
+            $battery = undef;
+        } else {
+            $battery //= 0;
+        }
+    }
 
     my %charge_texts = (0 => "nicht laden", 1 => "laden", 2 => "voll");
     my $charge_text  = $charge_texts{$charge_state} // "unbekannt ($charge_state)";
@@ -859,7 +876,7 @@ sub Mammotion_ProcessStatus {
     }
 
     readingsBeginUpdate($hash);
-    readingsBulkUpdate($hash, "battery",      $battery);
+    readingsBulkUpdate($hash, "battery",      $battery) if (defined($battery));
     readingsBulkUpdate($hash, "charge_state", $charge_text);
     readingsBulkUpdate($hash, "work_state",   $work_text);
     readingsBulkUpdate($hash, "work_state_since", FmtDateTime($now))
@@ -872,7 +889,7 @@ sub Mammotion_ProcessStatus {
     readingsBulkUpdate($hash, "state",        "online");
     readingsEndUpdate($hash, 1);
 
-    Log3($name, 4, "[$name] Status: Akku=$battery%, Arbeit=$work_text, Laden=$charge_text, "
+    Log3($name, 4, "[$name] Status: Akku=" . ($battery // "$battery_raw (verworfen)") . "%, Arbeit=$work_text, Laden=$charge_text, "
                  . sprintf("seit %.1f h nicht gemaeht", $idle_h) . ($alert ? " -> HINWEIS" : ""));
 }
 

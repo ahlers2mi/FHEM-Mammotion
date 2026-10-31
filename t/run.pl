@@ -124,5 +124,20 @@ is(Mammotion_Dauer(7 * 3600),   "7 Std.",  "Stunden");
 is(Mammotion_Dauer(47 * 3600),  "47 Std.", "bis 48 h Stunden");
 is(Mammotion_Dauer(3 * 86400),  "3 Tagen", "ab 48 h Tage");
 
+print "# 9. Leerer Cloud-Datensatz (Akku 0 + nicht aktiv) ueberschreibt den Akku nicht\n";
+neu(); $NOW = 1_756_800_000;
+poll(13, 92);
+is(rd("battery"), "92", "gueltiger Akkustand");
+std(0.2); poll(0, 0);
+is(rd("battery"), "92", "battery 0 bei work_state 0 wird verworfen");
+std(0.2); poll(13, 84);
+is(rd("battery"), "84", "naechster gueltiger Wert wird uebernommen");
+Mammotion_ProcessStatus($defs{$name}, { work_state => 13, charge_state => 0 }, FmtDateTime($NOW));
+is(rd("battery"), "84", "fehlendes battery behaelt den letzten Wert");
+poll(13, 0);
+is(rd("battery"), "0", "0 % beim Maehen (gueltiger Zustand) wird uebernommen");
+neu(); poll(0, 0);
+is(rd("battery"), "0", "ohne Vorwert wird 0 gesetzt (wie bisher)");
+
 print "\n$ok ok, $nok fehlgeschlagen\n";
 exit($nok ? 1 : 0);
