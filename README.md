@@ -35,6 +35,14 @@ unterstützt sowohl die **alte** API (`pymammotion.mammotion.devices.mammotion`,
 bis ca. 0.7.82) als auch die **neue** API (`pymammotion.client.MammotionClient`,
 ab ca. 0.7.117) und erkennt automatisch, welche installiert ist.
 
+Getestet zuletzt mit **0.10.13** (31.10.2026). Erst ab 0.10.x liefert die
+Bibliothek die Sperr- und Abbruchgründe (`block_reason`, `last_interrupt`) sinnvoll.
+
+> **Achtung, mehrere Installationen:** Liegt pymammotion zusätzlich im
+> Benutzerverzeichnis des FHEM-Users (`/opt/fhem/.local/lib/python3.13/site-packages`),
+> hat diese Kopie Vorrang. Dann als FHEM-User aktualisieren:
+> `sudo -u fhem -H /usr/bin/python3.13 -m pip install --user --break-system-packages --upgrade pymammotion`
+
 Für das **zonengenaue Starten** (`start_zone`) wird die neue API empfohlen, da
 nur sie die `MowPathSaga` (Routenberechnung + Bestätigung der Mähbahn) enthält.
 Mit der alten API funktioniert `start_zone` nur eingeschränkt.

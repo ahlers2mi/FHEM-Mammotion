@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.8.1";
+my $MODULE_VERSION = "1.9.0";
 
 my %sets = (
     "update"       => "noArg",
@@ -793,6 +793,19 @@ sub Mammotion_ProcessStatus {
     my ($hash, $data, $timestamp) = @_;
     my $name = $hash->{NAME};
 
+    # Helper ab 1.8.0: Statusreport kam nicht rechtzeitig -> keine Werte
+    # anfassen (frueher: Akku 0 / "nicht aktiv"), nur Zeitpunkt nachhalten.
+    if ($data->{no_report}) {
+        Log3($name, 3, "[$name] Status: kein Report vom Maeher nach "
+                     . ($data->{waited} // "?") . " s - Werte unveraendert");
+        readingsBeginUpdate($hash);
+        readingsBulkUpdate($hash, "last_update", $timestamp);
+        readingsBulkUpdate($hash, "last_error",  "");
+        readingsBulkUpdate($hash, "state",       "online");
+        readingsEndUpdate($hash, 1);
+        return;
+    }
+
     my $charge_state = $data->{charge_state} // 0;
 #   my $battery      = $data->{battery}      // 0;
     my $battery      = $data->{battery};
@@ -884,6 +897,39 @@ sub Mammotion_ProcessStatus {
     readingsBulkUpdate($hash, "last_mowing",  $last_mow);
     readingsBulkUpdate($hash, "idle_hours",   sprintf("%.1f", $idle_h));
     readingsBulkUpdate($hash, "idle_alert",   $alert);
+
+    # Zusatzinfos ab Helper 1.8.0 / pymammotion 0.10.x - nur wenn geliefert.
+    if (defined($data->{last_status})) {
+        my $ls = $data->{last_status};
+        readingsBulkUpdate($hash, "last_work_state", $work_texts{$ls} // "unbekannt ($ls)");
+    }
+    if (defined($data->{self_check_status})) {
+        my $sc = $data->{self_check_status};
+        readingsBulkUpdate($hash, "self_check_status", $sc);
+        readingsBulkUpdate($hash, "block_reason", Mammotion_BlockReason($sc));
+    }
+    readingsBulkUpdate($hash, "mow_percent", $data->{mow_percent}) if (defined($data->{mow_percent}));
+    if (ref($data->{error_codes}) eq "ARRAY") {
+        my @ec = @{$data->{error_codes}};
+        readingsBulkUpdate($hash, "error_codes", @ec ? join(",", @ec) : "");
+        readingsBulkUpdate($hash, "error_text",  @ec ? ($data->{error_text} // "") : "");
+        readingsBulkUpdate($hash, "error_time",
+            ($data->{error_time} // 0) > 1_000_000_000 ? FmtDateTime($data->{error_time}) : "")
+            if (@ec);
+    }
+    if (ref($data->{session}) eq "HASH") {
+        my $s   = $data->{session};
+        my $end = $s->{end} // 0;
+        $end = int($end / 1000) if ($end > 100_000_000_000);   # ms -> s
+        my $end_txt = $end > 1_000_000_000 ? FmtDateTime($end) : "";
+        if ($end_txt ne "" && $end_txt ne ReadingsVal($name, "last_session_end", "")) {
+            readingsBulkUpdate($hash, "last_session_end", $end_txt);
+            readingsBulkUpdate($hash, "last_session_progress", $s->{progress} // 0);
+            readingsBulkUpdate($hash, "last_interrupt",
+                $s->{interrupted} ? Mammotion_InterruptText($s->{interrupt_type} // 0) : "kein Abbruch");
+        }
+    }
+
     readingsBulkUpdate($hash, "last_update",  $timestamp);
     readingsBulkUpdate($hash, "last_error",   "");
     readingsBulkUpdate($hash, "state",        "online");
@@ -891,6 +937,47 @@ sub Mammotion_ProcessStatus {
 
     Log3($name, 4, "[$name] Status: Akku=" . ($battery // "$battery_raw (verworfen)") . "%, Arbeit=$work_text, Laden=$charge_text, "
                  . sprintf("seit %.1f h nicht gemaeht", $idle_h) . ($alert ? " -> HINWEIS" : ""));
+}
+
+# self_check_status -> Klartext. Quelle: pymammotion 0.10.13 (report_info.py,
+# mowing_modes.py): "0/10 none, 20 rain, 23 non-working hours, 34 rain
+# protection". Weitere Codes sind dort nicht dokumentiert -> Rohwert.
+sub Mammotion_BlockReason {
+    my ($c) = @_;
+    my %t = (0 => "", 10 => "", 20 => "Regen", 23 => "ausserhalb Arbeitszeit",
+             34 => "Regenschutz aktiv");
+    return exists($t{$c}) ? $t{$c} : "Code $c";
+}
+
+# WorkInterruptType (pymammotion 0.10.13 enums.py, Quelle laut Bibliothek: APK
+# TaskInterruptType). Uebersetzt, wo die Bedeutung eindeutig ist; sonst der
+# Enum-Name, damit nichts erfunden wird.
+sub Mammotion_InterruptText {
+    my ($c) = @_;
+    my %t = (
+        0  => "kein Abbruch",
+        1  => "manuell pausiert",
+        2  => "Fahrwerk manuell gesperrt",
+        3  => "Messer blockiert (manuell)",
+        4  => "festgefahren (manuell)",
+        5  => "ausserhalb der Grenze (manuell)",
+        6  => "manuell zur Station",
+        7  => "schlechte Positionierung",
+        8  => "Akku niedrig",
+        9  => "Stossfaenger getrennt",
+        10 => "Pause wegen Akku niedrig",
+        11 => "vorgegebener Fortschritt erreicht",
+        12 => "FORECAST_POWER_OFF_MANUALLY",
+        13 => "FORECAST_POSITIONING_AUTO",
+        14 => "FORECAST_LOW_BATTERY_MANUALLY",
+        15 => "FORECAST_PAUSING_MANUALLY",
+        16 => "FORECAST_POSITIONING_AUTO_16",
+        18 => "FORECAST_CONTINUE_TIME",
+        19 => "FORECAST_CONTINUE_TIME_BY_MANUAL",
+        20 => "Messer blockiert (manuell)",
+        21 => "festgefahren (manuell)",
+    );
+    return ($t{$c} // "unbekannt") . " ($c)";
 }
 
 # Sekunden -> "35 min" / "7 Std." / "3 Tagen" (Dativ, weil es hinter "seit" steht).
@@ -1101,6 +1188,25 @@ sub Mammotion_WatchdogReset {
   </ul>
   Hinweis: das Polling-Intervall bestimmt, wie fein Maehen erkannt wird - mit
   <code>interval 600</code> kann ein Maehlauf unter 10 Minuten unbemerkt bleiben.
+  <br><br>
+  <b>Readings zu Sperr- und Abbruchgruenden</b> (ab 1.9.0, Helper 1.8.0; sinnvoll
+  belegt erst mit pymammotion &ge; 0.10, sonst fehlen sie):<br>
+  <ul>
+    <li><code>last_work_state</code> - vorheriger Arbeitszustand laut Maeher</li>
+    <li><code>self_check_status</code> / <code>block_reason</code> - was den Start
+      verhindert (Rohwert / Klartext: Regen, ausserhalb Arbeitszeit,
+      Regenschutz aktiv; unbekannte Codes als <code>Code n</code>; leer = nichts)</li>
+    <li><code>mow_percent</code> - Fortschritt des laufenden Auftrags in %</li>
+    <li><code>error_codes</code> / <code>error_text</code> / <code>error_time</code> -
+      aktive Fehlercodes des Maehers (nur, wenn die Bibliothek sie liefert)</li>
+    <li><code>last_session_end</code> / <code>last_session_progress</code> /
+      <code>last_interrupt</code> - Ende, Fortschritt und Abbruchgrund des letzten
+      Auftrags. Der Maeher meldet das nur einmal am Auftragsende; bei kurzem
+      Polling wird es nicht zwingend gesehen.</li>
+  </ul>
+  Kommt der Statusreport innerhalb von 15 s nicht an, bleiben alle Werte
+  unveraendert (Log Stufe 3 "kein Report") - frueher kamen dann Akku 0 und
+  "nicht aktiv".
 </ul>
 
 =end html

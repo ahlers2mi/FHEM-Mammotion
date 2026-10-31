@@ -36,7 +36,7 @@ import logging
 
 # Versionskennung des Helpers (wird zu Beginn ins stderr geloggt, damit im
 # FHEM-Log sichtbar ist, welche Helper-Datei tatsaechlich ausgefuehrt wird).
-HELPER_VERSION = "1.7.11"
+HELPER_VERSION = "1.8.0"
 
 # Nach einem Kommando (MQTT-Publish) MUESSEN wir kurz warten, BEVOR der Prozess
 # per os._exit() hart beendet wird. send_command_with_args() reiht die Nachricht
@@ -47,6 +47,7 @@ HELPER_VERSION = "1.7.11"
 # get_status) waren davon nie betroffen, weil sie nach dem Senden ohnehin lange
 # pollen und der Publish dabei rausgeht.
 POST_SEND_SETTLE = 6
+STATUS_WAIT = 15  # max. Sekunden Warten auf den Statusreport (get_status)
 
 
 # Wird von get_zones gesetzt: Funktion, die die aktuell bekannten Zonen aus dem
@@ -493,17 +494,36 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
 
         elif action == "get_status":
             await send(device_name, "get_report_cfg")
-            await asyncio.sleep(5)
+#           await asyncio.sleep(5)
+            # Auf den Report warten statt fest 5 s. Kommt er nicht rechtzeitig,
+            # stehen in report_data.dev noch die Defaults (Akku 0, Zustand 0,
+            # Laden 0) - das waren die "leeren Datensaetze" mit falscher
+            # Batteriewarnung. Darum bis STATUS_WAIT s pruefen und ohne Report
+            # "no_report" melden statt Nullen zu liefern.
+            def _dev_now():
+                m = get_state(device_name)
+                rd = getattr(m, "report_data", None) if m is not None else None
+                return m, (getattr(rd, "dev", None) if rd is not None else None)
 
-            mower = get_state(device_name)
+            def _dev_filled(d):
+                return d is not None and (d.sys_status or d.battery_val or d.charge_state)
+
+            waited = 0
+            mower, dev = _dev_now()
+            while not _dev_filled(dev) and waited < STATUS_WAIT:
+                await asyncio.sleep(1)
+                waited += 1
+                mower, dev = _dev_now()
+
             if mower is None:
                 return {"ok": False, "error": "Device state not available"}
 
             if not hasattr(mower, "report_data") or mower.report_data is None:
                 return {"ok": False, "error": "Report data not available"}
-            dev = mower.report_data.dev
             if dev is None:
                 return {"ok": False, "error": "Device data not available"}
+            if not _dev_filled(dev):
+                return {"ok": True, "action": "get_status", "no_report": True, "waited": waited}
 
             location = mower.location if hasattr(mower, "location") else None
 
@@ -515,6 +535,54 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                 "work_state":   dev.sys_status,
                 "mow_zone":     location.work_zone if location is not None else 0,
             }
+
+            # Zusatzinfos (ab pymammotion 0.10.x sinnvoll belegt; mit aelteren
+            # Versionen fehlen sie einfach). Alles defensiv per getattr.
+            try:
+                result["last_status"]       = int(getattr(dev, "last_status", 0) or 0)
+                result["self_check_status"] = int(getattr(dev, "self_check_status", 0) or 0)
+                work = getattr(mower.report_data, "work", None)
+                if work is not None:
+                    area = int(getattr(work, "area", 0) or 0)
+                    result["mow_percent"] = area >> 16
+                    result["area_mowed"]  = area & 0xFFFF
+            except Exception:
+                pass
+
+            try:
+                errs = getattr(mower, "errors", None)
+                codes = [c for c in (getattr(errs, "err_code_list", []) or []) if c]
+                times = list(getattr(errs, "err_code_list_time", []) or [])
+                if errs is not None:
+                    result["error_codes"] = codes
+                    if codes:
+                        first = codes[0]
+                        txt = ""
+                        if hasattr(errs, "describe"):
+                            try:
+                                txt = errs.describe(first, "de") or ""
+                            except Exception:
+                                txt = ""
+                        result["error_text"] = txt
+                        nz = [t for c, t in zip(getattr(errs, "err_code_list", []), times) if c]
+                        result["error_time"] = int(nz[0]) if nz else 0
+            except Exception:
+                pass
+
+            try:
+                ws = getattr(mower, "work_session_result", None)
+                if ws is not None and int(getattr(ws, "end_work_time", 0) or 0) > 0:
+                    result["session"] = {
+                        "interrupted":    bool(getattr(ws, "interrupt_flag", False)),
+                        "interrupt_type": int(getattr(ws, "interrupt_type", 0) or 0),
+                        "start":          int(getattr(ws, "start_work_time", 0) or 0),
+                        "end":            int(getattr(ws, "end_work_time", 0) or 0),
+                        "progress":       int(getattr(ws, "work_progress", 0) or 0),
+                        "area":           float(getattr(ws, "work_area", 0) or 0),
+                    }
+            except Exception:
+                pass
+
             return result
 
         else:

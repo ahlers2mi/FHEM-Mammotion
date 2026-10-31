@@ -139,5 +139,37 @@ is(rd("battery"), "0", "0 % beim Maehen (gueltiger Zustand) wird uebernommen");
 neu(); poll(0, 0);
 is(rd("battery"), "0", "ohne Vorwert wird 0 gesetzt (wie bisher)");
 
+print "# 10. Helper meldet no_report: nichts wird ueberschrieben\n";
+neu(); $NOW = 1_756_800_000;
+poll(13, 80);
+Mammotion_ProcessStatus($defs{$name}, { no_report => 1, waited => 15 }, FmtDateTime($NOW));
+is(rd("battery"), "80", "Akku bleibt");
+is(rd("work_state"), "maeht", "work_state bleibt");
+is(rd("last_error"), "", "kein Fehler gesetzt");
+
+print "# 11. Zusatzfelder (pymammotion 0.10.x)\n";
+neu(); $NOW = 1_756_800_000;
+Mammotion_ProcessStatus($defs{$name}, { work_state => 11, battery => 63, charge_state => 2,
+    last_status => 13, self_check_status => 20, mow_percent => 47, error_codes => [],
+    session => { interrupted => 1, interrupt_type => 7, end => 1_756_799_000, progress => 47 } },
+    FmtDateTime($NOW));
+is(rd("last_work_state"), "maeht", "last_status als Klartext");
+is(rd("block_reason"), "Regen", "self_check 20 -> Regen");
+is(rd("mow_percent"), "47", "Fortschritt");
+is(rd("error_codes"), "", "keine Fehler");
+is(rd("last_interrupt"), "schlechte Positionierung (7)", "Abbruchgrund");
+is(rd("last_session_end"), FmtDateTime(1_756_799_000), "Auftragsende");
+Mammotion_ProcessStatus($defs{$name}, { work_state => 11, battery => 63, charge_state => 2,
+    self_check_status => 99, error_codes => [1234], error_text => "Testfehler", error_time => 1_756_799_500,
+    session => { interrupted => 0, end => 1_756_799_000_000 } }, FmtDateTime($NOW));
+is(rd("block_reason"), "Code 99", "unbekannter Code roh");
+is(rd("error_codes"), "1234", "Fehlercode");
+is(rd("error_text"), "Testfehler", "Fehlertext");
+is(rd("last_interrupt"), "schlechte Positionierung (7)", "gleiches Auftragsende (ms) aendert nichts");
+Mammotion_ProcessStatus($defs{$name}, { work_state => 11, battery => 63, charge_state => 2,
+    self_check_status => 0 }, FmtDateTime($NOW));
+is(rd("block_reason"), "", "0 = keine Sperre");
+is(rd("error_codes"), "1234", "ohne error_codes im Datensatz bleibt der alte Wert");
+
 print "\n$ok ok, $nok fehlgeschlagen\n";
 exit($nok ? 1 : 0);
