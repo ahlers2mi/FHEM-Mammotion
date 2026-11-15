@@ -15,6 +15,13 @@ FHEM-Modul zur Anbindung von Mammotion Rasenmähern (Luba, Yuka u.a.) über die 
   `idleAlertHours` (Standard 48 h) nicht gemäht hat – etwa weil er nach Regen
   in `pausiert` stehen geblieben ist
 - 🛡️ Watchdog: hängende Python-Prozesse werden automatisch beendet
+- 🔎 Gespeicherte Einstellungen der Aufgaben lesen (ab v1.10.0, nur lesend):
+  `get <name> tasks` legt je Aufgabe zusätzlich `task_N_collect_freq`
+  (Häufigkeit Gras sammeln/leeren), `task_N_job_cfg` (Yuka-Job-Konfiguration),
+  `task_N_enabled`, `task_N_reserved` (Rohbytes) und `task_N_detail` (alle
+  gelesenen Werte als JSON) an. Grundlage ist der 8-Byte-Puffer `reserved` der
+  Aufgabe (Gerät speichert +10, angezeigt wird der bereinigte Wert). Wie die Werte
+  den Angaben in der App entsprechen, ist noch nicht abgeglichen.
 
 ## Voraussetzungen
 
