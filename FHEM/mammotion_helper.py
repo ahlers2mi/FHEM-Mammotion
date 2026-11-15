@@ -25,6 +25,7 @@ Aktionen (MQTT):
   get_status       <device_name> <iot_id>
   get_tasks        <device_name> <iot_id>
   start_task       <device_name> <iot_id> <plan_id>
+  set_task_collect <device_name> <iot_id> <plan_id> <m2>   (v1.11.0)
 """
 
 import sys
@@ -285,6 +286,31 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
         if get_state(device_name) is None:
             return {"ok": False, "error": "Geraet nicht gefunden: {}".format(device_name)}
 
+        def _reserved_list(plan):
+            r = getattr(plan, "reserved", "") or ""
+            return list(r) if isinstance(r, (bytes, bytearray)) else [ord(c) for c in str(r)]
+
+        async def _read_plan(dev, pid, quick=False, sync_timeout=60):
+            """Aufgabe pid aus dem Geraetezustand; ohne quick vorher Plaene neu holen."""
+            if not quick:
+                try:
+                    await asyncio.wait_for(plan_sync(dev), timeout=sync_timeout)
+                except Exception:
+                    pass
+                waited = 0
+                while waited < 30:
+                    m = get_state(dev)
+                    pm = getattr(getattr(m, "map", None), "plan", {}) or {} if m is not None else {}
+                    if pid in pm:
+                        break
+                    await asyncio.sleep(3)
+                    waited += 3
+            m = get_state(dev)
+            if m is None:
+                return None
+            pm = getattr(getattr(m, "map", None), "plan", {}) or {}
+            return pm.get(pid)
+
         if action == "start_mowing":
             await send(device_name, "start_job")
             await asyncio.sleep(POST_SEND_SETTLE)
@@ -517,6 +543,72 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
 
             return {"ok": True, "action": "get_tasks", "tasks": tasks}
 
+        elif action == "set_task_collect":
+            # Abladeintervall (m2) einer gespeicherten Aufgabe aendern (v1.11.0).
+            # Nur reserved[6] wird geaendert, alles andere geht unveraendert
+            # zurueck (Edit, sub_cmd 4) - insbesondere reserved[5] (Yuka-Job-
+            # Konfiguration, 4 = Gras sammeln), das die App beim Bearbeiten
+            # auf Maehen zuruecksetzt. Danach wird die Aufgabe neu gelesen
+            # und geprueft.
+            if len(extra_params) < 2:
+                return {"ok": False, "error": "plan_id und m2 erforderlich"}
+            plan_id = str(extra_params[0])
+            try:
+                m2 = int(extra_params[1])
+            except ValueError:
+                return {"ok": False, "error": "m2 muss eine ganze Zahl sein"}
+            if m2 < 1 or m2 > 99:
+                return {"ok": False, "error": "m2 ausserhalb 1..99"}
+            if not _new_api:
+                return {"ok": False, "error": "Aufgabe bearbeiten nur mit neuer pymammotion-API"}
+            try:
+                from pymammotion.data.model.hash_list import Plan as _Plan
+            except ImportError:
+                _Plan = None
+            if _Plan is None or not hasattr(_Plan, "reserved_for_send"):
+                # Ohne reserved_for_send wuerden die gelesenen Werte (+10)
+                # erneut um 10 verschoben (Mammotion-HA #891) - lieber nichts tun.
+                return {"ok": False, "error": "pymammotion ohne Plan.reserved_for_send - Schreiben gesperrt"}
+
+            plan = await _read_plan(device_name, plan_id)
+            if plan is None:
+                return {"ok": False, "error": "Aufgabe {} nicht gefunden".format(plan_id)}
+            raw = _reserved_list(plan)
+            if len(raw) < 7:
+                return {"ok": False, "error": "reserved der Aufgabe zu kurz: {}".format(raw)}
+            before = _plan_detail(plan)
+            if before.get("collect_freq") == m2:
+                return {"ok": True, "action": "set_task_collect", "plan_id": plan_id,
+                        "unchanged": True, "before": before, "after": before}
+
+            raw[6] = m2 + 10                     # Echo-Form wie gelesen; reserved_for_send zieht 10 ab
+            import dataclasses as _dc
+            new_plan = _dc.replace(plan, reserved=bytes(raw).decode("latin-1"))
+            await send(device_name, "edit_plan", plan=new_plan)
+            await asyncio.sleep(POST_SEND_SETTLE)
+
+            # Kontrolle: neu lesen, bis der neue Wert da ist (max ~40 s)
+            after = None
+            for _ in range(8):
+                await asyncio.sleep(5)
+                p2 = await _read_plan(device_name, plan_id, quick=(_ != 4), sync_timeout=30)
+                if p2 is not None:
+                    after = _plan_detail(p2)
+                    if after.get("collect_freq") == m2:
+                        break
+            if after is None:
+                return {"ok": False, "action": "set_task_collect", "plan_id": plan_id,
+                        "error": "gesendet, Kontrolle nicht moeglich (Aufgabe nicht neu gelesen)", "before": before}
+            changed = sorted(k for k in before
+                             if k not in ("collect_freq", "reserved_raw") and before.get(k) != after.get(k))
+            ok = after.get("collect_freq") == m2 and after.get("job_cfg") == before.get("job_cfg")
+            res = {"ok": ok, "action": "set_task_collect", "plan_id": plan_id, "m2": m2,
+                   "before": before, "after": after, "also_changed": changed}
+            if not ok:
+                res["error"] = "Kontrolle fehlgeschlagen: collect_freq {} job_cfg {}->{}".format(
+                    after.get("collect_freq"), before.get("job_cfg"), after.get("job_cfg"))
+            return res
+
         elif action == "start_task":
             if not extra_params:
                 return {"ok": False, "error": "plan_id parameter required"}
@@ -661,7 +753,8 @@ async def run(account, password, action, params, app_version=DEFAULT_APP_VERSION
     mqtt_actions = {
         "start_mowing", "stop_mowing", "pause_mowing", "resume_mowing",
         "return_home", "leave_dock", "along_border",
-        "get_zones", "start_zone", "get_status", "get_tasks", "start_task"
+        "get_zones", "start_zone", "get_status", "get_tasks", "start_task",
+        "set_task_collect"
     }
 
     if action in mqtt_actions:
@@ -751,6 +844,7 @@ if __name__ == "__main__":
         "start_zone": (200, 220),
         "get_tasks":  (140, 160),
         "start_task": (140, 160),
+        "set_task_collect": (205, 220),
         "get_status": (70, 80),
     }
     wf, wd = _budget.get(action, (50, 55))

@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.10.0";
+my $MODULE_VERSION = "1.11.0";
 
 my %sets = (
     "update"       => "noArg",
@@ -37,6 +37,7 @@ my %sets = (
     "along_border" => "noArg",
     "start_zone"   => "textField",
     "start_task"   => "textField",
+    "task_collect" => "textField",
     "selectDevice" => "textField",
 );
 
@@ -245,6 +246,22 @@ sub Mammotion_Set {
 
         Log3($name, 3, "[$name] Starte Zone: $zone_hash (Eingabe: $zone_input)");
         Mammotion_SendCommand($hash, "start_zone", $deviceName, $iotId, $zone_hash);
+        return undef;
+    }
+
+    if ($cmd eq "task_collect") {
+        # Abladeintervall (m2) einer gespeicherten Aufgabe setzen (v1.11.0):
+        #   set <name> task_collect <Aufgabe> <m2>
+        my $m2 = pop @args;
+        my $task_input = join(" ", @args);
+        return "Aufruf: set $name task_collect <Aufgabe> <m2>  (z. B. MagnolieSammeln 6)"
+            if (!defined($m2) || $m2 !~ /^\d+$/ || $task_input eq "");
+        return "m2 muss zwischen 1 und 99 liegen" if ($m2 < 1 || $m2 > 99);
+        my $plan_id = Mammotion_FindPlanId($name, $task_input);
+        return "Aufgabe '$task_input' nicht gefunden. Erst 'get $name tasks' ausfuehren." if (!$plan_id);
+        Log3($name, 3, "[$name] Abladeintervall: $task_input (plan_id $plan_id) -> $m2 m2");
+        readingsSingleUpdate($hash, "task_collect_result", "laeuft: $task_input -> $m2 m2", 1);
+        Mammotion_SendCommand($hash, "set_task_collect", $deviceName, $iotId, $plan_id, $m2);
         return undef;
     }
 
@@ -534,6 +551,21 @@ sub Mammotion_FetchDevices {
     }
 }
 
+# Aufgabe (Name, Name mit _ statt Leerzeichen, oder ID) -> plan_id aus tasks_json
+sub Mammotion_FindPlanId {
+    my ($name, $input) = @_;
+    my $tasks;
+    eval { $tasks = decode_json(ReadingsVal($name, "tasks_json", "[]")) };
+    return undef if (!$tasks || ref($tasks) ne 'ARRAY');
+    for my $t (@$tasks) {
+        my $tname = $t->{name} // "";
+        (my $norm = $tname) =~ s/[ ,]/_/g;
+        return $t->{plan_id}
+            if (lc($norm) eq lc($input) || lc($tname) eq lc($input) || ($t->{id} // "") eq $input);
+    }
+    return undef;
+}
+
 sub Mammotion_SendCommand {
     my ($hash, $action, $deviceName, $iotId, @extra) = @_;
     my $name = $hash->{NAME};
@@ -555,6 +587,7 @@ sub Mammotion_SendCommand {
 
     my $timeout = ($action eq "get_zones") ? 240 :
                   ($action eq "start_zone") ? 240 :
+                  ($action eq "set_task_collect") ? 230 :
                   ($action =~ /^(get_tasks|start_task)$/) ? 180 :
                   ($action eq "get_status") ? 90 : 90;
 
@@ -575,6 +608,7 @@ sub Mammotion_SendCommand {
         # Watchdog: BlockingCall-Timeout + 30s Puffer
         my $watchdog_timeout = ($action eq "get_zones") ? 270 :
                                ($action eq "start_zone") ? 270 :
+                               ($action eq "set_task_collect") ? 260 :
                                ($action =~ /^(get_tasks|start_task)$/) ? 210 :
                                ($action eq "get_status") ? 120 : 120;
         InternalTimer(gettimeofday() + $watchdog_timeout, "Mammotion_WatchdogReset", $hash, 0);
@@ -655,6 +689,40 @@ sub Mammotion_PythonCall {
     }
 
     return "$name|OK|$json_line";
+}
+
+# Ergebnis von set_task_collect: Kontrollwerte in die task_N_*-Readings
+sub Mammotion_TaskCollectDone {
+    my ($hash, $j, $timestamp) = @_;
+    my $name  = $hash->{NAME};
+    my $after = $j->{after} // {};
+    my $pid   = $j->{plan_id} // "";
+    my $tasks;
+    eval { $tasks = decode_json(ReadingsVal($name, "tasks_json", "[]")) };
+    my ($i, $tname) = (undef, $pid);
+    if ($tasks && ref($tasks) eq 'ARRAY') {
+        for my $k (0 .. $#$tasks) {
+            if (($tasks->[$k]{plan_id} // "") eq $pid) { $i = $k; $tname = $tasks->[$k]{name}; last; }
+        }
+    }
+    my $txt = $j->{unchanged}
+        ? "$tname: schon " . ($after->{collect_freq} // "?") . " m2, nichts geaendert"
+        : "$tname: " . ($j->{before}{collect_freq} // "?") . " -> " . ($after->{collect_freq} // "?") . " m2 ok"
+          . (@{$j->{also_changed} // []} ? " (ausserdem geaendert: " . join(",", @{$j->{also_changed}}) . ")" : "");
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "task_collect_result", $txt);
+    if (defined $i && ref($after) eq 'HASH' && %$after) {
+        readingsBulkUpdate($hash, "task_${i}_collect_freq", $after->{collect_freq} // "");
+        readingsBulkUpdate($hash, "task_${i}_job_cfg",      $after->{job_cfg}      // "");
+        readingsBulkUpdate($hash, "task_${i}_reserved",     join(",", @{$after->{reserved_raw} // []}));
+        readingsBulkUpdate($hash, "task_${i}_detail",       encode_json($after));
+    }
+    readingsBulkUpdate($hash, "last_update", $timestamp);
+    readingsBulkUpdate($hash, "last_error",  "");
+    readingsBulkUpdate($hash, "state", "online");
+    readingsEndUpdate($hash, 1);
+    Log3($name, 3, "[$name] Abladeintervall: $txt");
+    return;
 }
 
 sub Mammotion_PythonDone {
@@ -776,6 +844,11 @@ sub Mammotion_PythonDone {
         for my $t (@tasks) {
             Log3($name, 3, "[$name] Aufgabe: $t->{name} (ID: $t->{id})");
         }
+        return;
+    }
+
+    if ($action eq "set_task_collect") {
+        Mammotion_TaskCollectDone($hash, $json_data, $timestamp);
         return;
     }
 
@@ -1155,6 +1228,9 @@ sub Mammotion_WatchdogReset {
     <li><code>along_border</code> - Randmodus</li>
     <li><code>start_zone &lt;hash_oder_name&gt;</code> - Bestimmte Zone maehen (Hash oder Name)</li>
     <li><code>start_task &lt;id_oder_name&gt;</code> - Bestimmte Aufgabe starten (ID oder Name)</li>
+    <li><code>task_collect &lt;id_oder_name&gt; &lt;m2&gt;</code> - Abladeintervall (Gras sammeln, in m&sup2;) einer
+      gespeicherten Aufgabe setzen. Nur dieser Wert wird geaendert, alles andere (auch der Sammel-Modus) bleibt;
+      danach wird die Aufgabe neu gelesen und geprueft, Ergebnis in <code>task_collect_result</code>.</li>
     <li><code>selectDevice &lt;name&gt;</code> - Geraet waehlen</li>
   </ul><br>
 

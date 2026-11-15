@@ -204,5 +204,24 @@ like(rd("task_0_detail"), qr/"knife_height":40/, "Detail als JSON");
 unlike_ok: { my $j = rd("tasks_json"); is(($j =~ /detail/) ? "mit" : "ohne", "ohne", "tasks_json ohne Details"); }
 is(rd("task_1_collect_freq"), "(fehlt)", "Aufgabe ohne Details: keine Detail-Readings");
 
+# ---------------------------------------------------------------------------
+print "\n# Abladeintervall setzen (v1.11.0)\n";
+is(Mammotion_FindPlanId($name, "ObenSammeln"), "p4", "plan_id per Name");
+is(Mammotion_FindPlanId($name, "obensammeln"), "p4", "Gross/klein egal");
+is(Mammotion_FindPlanId($name, "1"), "p1", "plan_id per ID");
+is(Mammotion_FindPlanId($name, "Gibtsnicht") // "undef", "undef", "unbekannt -> undef");
+Mammotion_PythonDone("$name|OK|" . '{"ok":true,"action":"set_task_collect","plan_id":"p4","m2":6,'
+  . '"before":{"collect_freq":15,"job_cfg":3},'
+  . '"after":{"collect_freq":6,"job_cfg":3,"reserved_raw":[11,12,10,10,10,13,16,0]},"also_changed":[]}');
+is(rd("task_collect_result"), "ObenSammeln: 15 -> 6 m2 ok", "Ergebnistext");
+is(rd("task_0_collect_freq"), "6", "Reading der Aufgabe aktualisiert");
+is(rd("task_0_reserved"), "11,12,10,10,10,13,16,0", "Rohbytes aktualisiert");
+is(rd("task_0_job_cfg"), "3", "Sammel-Modus unveraendert");
+Mammotion_PythonDone("$name|OK|" . '{"ok":true,"action":"set_task_collect","plan_id":"p4","unchanged":true,'
+  . '"before":{"collect_freq":6},"after":{"collect_freq":6,"job_cfg":3}}');
+is(rd("task_collect_result"), "ObenSammeln: schon 6 m2, nichts geaendert", "gleicher Wert -> nichts geschrieben");
+Mammotion_PythonDone("$name|OK|" . '{"ok":false,"action":"set_task_collect","plan_id":"p4","error":"Kontrolle fehlgeschlagen: collect_freq 15 job_cfg 3->4"}');
+like(rd("last_error"), qr/Kontrolle fehlgeschlagen/, "Fehler landet in last_error");
+
 print "\n$ok ok, $nok fehlgeschlagen\n";
 exit($nok ? 1 : 0);
