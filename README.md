@@ -22,6 +22,15 @@ FHEM-Modul zur Anbindung von Mammotion Rasenmähern (Luba, Yuka u.a.) über die 
   gelesenen Werte als JSON) an. Grundlage ist der 8-Byte-Puffer `reserved` der
   Aufgabe (Gerät speichert +10, angezeigt wird der bereinigte Wert). Wie die Werte
   den Angaben in der App entsprechen, ist noch nicht abgeglichen.
+- ✏️ Abladeintervall einer Aufgabe setzen (ab v1.11.0):
+  `set <name> task_collect <Aufgabe> <m²>`, z. B. `set Yuka task_collect MagnolieSammeln 6`.
+  Abgeglichen am Yuka: `collect_freq` ist direkt das Abladeintervall in m² der App,
+  `job_cfg` 4 = Gras sammeln, 8 = Mähen. Geändert wird nur dieser eine Wert; die
+  Aufgabe geht sonst unverändert als Edit zurück (der Sammel-Modus bleibt – anders als
+  beim Bearbeiten in der App). Danach liest das Modul die Aufgabe neu und prüft
+  Intervall und Modus, Ergebnis in `task_collect_result`. Benötigt pymammotion mit
+  `Plan.reserved_for_send` (sonst verweigert der Helfer das Schreiben, weil sich die
+  Werte sonst bei jedem Schreiben um 10 verschieben würden).
 
 ## Voraussetzungen
 
