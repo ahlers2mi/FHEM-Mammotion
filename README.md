@@ -31,6 +31,9 @@ FHEM-Modul zur Anbindung von Mammotion Rasenmähern (Luba, Yuka u.a.) über die 
   Intervall und Modus, Ergebnis in `task_collect_result`. Benötigt pymammotion mit
   `Plan.reserved_for_send` (sonst verweigert der Helfer das Schreiben, weil sich die
   Werte sonst bei jedem Schreiben um 10 verschieben würden).
+- ⏯️ Aufgabe ein-/ausschalten (ab v1.12.0): `set <name> task_enabled <Aufgabe> 0|1`,
+  nach demselben Muster (nur das aktiv-Flag, Kontrolle danach, Intervall und
+  Sammel-Modus müssen gleich bleiben).
 
 ## Voraussetzungen
 
