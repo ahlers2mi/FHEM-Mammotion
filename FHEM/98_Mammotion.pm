@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.9.1";
+my $MODULE_VERSION = "1.10.0";
 
 my %sets = (
     "update"       => "noArg",
@@ -746,8 +746,12 @@ sub Mammotion_PythonDone {
             }
         }
 
+        # tasks_json bleibt schlank (id/name/zones/plan_id) - die Details der
+        # Aufgaben (v1.10.0, nur lesend) stehen in eigenen Readings.
+        my @slim = map { my %c = %$_; delete $c{detail}; \%c } @tasks;
+
         readingsBeginUpdate($hash);
-        readingsBulkUpdate($hash, "tasks_json",  encode_json(\@tasks));
+        readingsBulkUpdate($hash, "tasks_json",  encode_json(\@slim));
         readingsBulkUpdate($hash, "tasks_count", scalar @tasks);
         readingsBulkUpdate($hash, "last_update", $timestamp);
         readingsBulkUpdate($hash, "last_error",  "");
@@ -756,6 +760,14 @@ sub Mammotion_PythonDone {
         for my $t (@tasks) {
             readingsBulkUpdate($hash, "task_${i}_id",   $t->{id}   // "");
             readingsBulkUpdate($hash, "task_${i}_name",  $t->{name} // "");
+            my $d = $t->{detail};
+            if (ref($d) eq 'HASH') {
+                readingsBulkUpdate($hash, "task_${i}_collect_freq", $d->{collect_freq} // "");
+                readingsBulkUpdate($hash, "task_${i}_job_cfg",      $d->{job_cfg}      // "");
+                readingsBulkUpdate($hash, "task_${i}_enabled",      defined($d->{enabled}) ? ($d->{enabled} ? 1 : 0) : "");
+                readingsBulkUpdate($hash, "task_${i}_reserved",     join(",", @{$d->{reserved_raw} // []}));
+                readingsBulkUpdate($hash, "task_${i}_detail",       encode_json($d));
+            }
             $i++;
         }
         readingsBulkUpdate($hash, "state", "online");

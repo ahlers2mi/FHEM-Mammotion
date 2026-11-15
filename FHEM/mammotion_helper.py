@@ -138,6 +138,42 @@ def _patch_legacy_login():
     MammotionHTTP._fhem_legacy_login_patched = True
 
 
+def _plan_detail(plan):
+    """Gespeicherte Einstellungen einer Aufgabe, nur lesend (v1.10.0).
+
+    reserved ist ein 8-Byte-Puffer (laut pymammotion docs/tasks_and_schedules.md):
+      0 Bahnfolge   1 Runden Sperrzone   2 aktiv-Flag (10 = an, 11 = aus)
+      3 Startfortschritt   4 Luba1-Winkelmodus   5 Yuka-Job-Konfiguration
+      6 Haeufigkeit Gras sammeln/leeren   7 unbenutzt
+    Das Geraet speichert die Werte +10, hier steht der Rohwert und der
+    um 10 bereinigte Wert. Die Bedeutung von 5 und 6 in App-Einheiten ist
+    noch nicht abgeglichen - deshalb nur Rohdaten, kein Schreiben.
+    """
+    d = {}
+    for k in ("model", "route_model", "knife_height", "edge_mode", "area", "work_time",
+              "required_time", "speed", "route_spacing", "route_angle", "toward_mode",
+              "toward_included_angle", "ride_boundary_distance", "ultrasonic_barrier",
+              "start_time", "end_time", "week", "weeks", "trigger_type", "start_date"):
+        v = getattr(plan, k, None)
+        if isinstance(v, (int, float, str, bool)) or v is None:
+            d[k] = v
+        elif isinstance(v, (list, tuple)):
+            d[k] = [x for x in v if isinstance(x, (int, float, str))]
+    r = getattr(plan, "reserved", "") or ""
+    if isinstance(r, (bytes, bytearray)):
+        raw = list(r)
+    else:
+        raw = [ord(c) for c in str(r)]
+    d["reserved_raw"] = raw
+    if len(raw) > 2:
+        d["enabled"] = (raw[2] in (0, 10))
+    if len(raw) > 5:
+        d["job_cfg"] = raw[5] - 10 if raw[5] >= 10 else raw[5]
+    if len(raw) > 6:
+        d["collect_freq"] = raw[6] - 10 if raw[6] >= 10 else raw[6]
+    return d
+
+
 def _swallow_task_result(task):
     """done-Callback fuer fire-and-forget Tasks: holt eine evtl. Exception ab,
     damit kein "Task exception was never retrieved" im stderr landet."""
@@ -476,6 +512,7 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                     "name":    task_name,
                     "zones":   zone_hashs,
                     "plan_id": plan_id,
+                    "detail":  _plan_detail(plan),
                 })
 
             return {"ok": True, "action": "get_tasks", "tasks": tasks}

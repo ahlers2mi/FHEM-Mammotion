@@ -188,5 +188,21 @@ $attr{$name}{pauseAlertMinutes} = 15;
 Mammotion_ProcessStatus($defs{$name}, { work_state => 11, battery => 87, charge_state => 0 }, FmtDateTime($NOW));
 is(rd("pause_alert"), "", "anderer Zustand loescht den Hinweis");
 
+# ---------------------------------------------------------------------------
+print "\n# Aufgaben mit Details (v1.10.0, nur lesend)\n";
+neu();
+Mammotion_PythonDone("$name|OK|" . '{"ok":true,"action":"get_tasks","tasks":['
+  . '{"id":"4","name":"ObenSammeln","zones":[1,2],"plan_id":"p4",'
+  .  '"detail":{"reserved_raw":[11,12,10,10,10,13,25,0],"enabled":true,"job_cfg":3,"collect_freq":15,"knife_height":40}},'
+  . '{"id":"1","name":"Taeglich","zones":[3],"plan_id":"p1"}]}');
+is(rd("tasks_count"), "2", "zwei Aufgaben");
+is(rd("task_0_collect_freq"), "15", "Haeufigkeit (Byte 6 - 10)");
+is(rd("task_0_job_cfg"), "3", "Job-Konfiguration (Byte 5 - 10)");
+is(rd("task_0_enabled"), "1", "aktiv");
+is(rd("task_0_reserved"), "11,12,10,10,10,13,25,0", "Rohbytes");
+like(rd("task_0_detail"), qr/"knife_height":40/, "Detail als JSON");
+unlike_ok: { my $j = rd("tasks_json"); is(($j =~ /detail/) ? "mit" : "ohne", "ohne", "tasks_json ohne Details"); }
+is(rd("task_1_collect_freq"), "(fehlt)", "Aufgabe ohne Details: keine Detail-Readings");
+
 print "\n$ok ok, $nok fehlgeschlagen\n";
 exit($nok ? 1 : 0);
