@@ -223,5 +223,15 @@ is(rd("task_collect_result"), "ObenSammeln: schon 6 m2, nichts geaendert", "glei
 Mammotion_PythonDone("$name|OK|" . '{"ok":false,"action":"set_task_collect","plan_id":"p4","error":"Kontrolle fehlgeschlagen: collect_freq 15 job_cfg 3->4"}');
 like(rd("last_error"), qr/Kontrolle fehlgeschlagen/, "Fehler landet in last_error");
 
+print "\n# Aufgabe ein/aus (v1.12.0)\n";
+Mammotion_PythonDone("$name|OK|" . '{"ok":true,"action":"set_task_enabled","plan_id":"p4","enabled":false,'
+  . '"before":{"enabled":true,"collect_freq":6,"job_cfg":3},'
+  . '"after":{"enabled":false,"collect_freq":6,"job_cfg":3,"reserved_raw":[11,12,11,10,10,13,16,0]},"also_changed":[]}');
+is(rd("task_collect_result"), "ObenSammeln: aus ok", "aus ok");
+is(rd("task_0_enabled"), "0", "enabled-Reading 0");
+Mammotion_PythonDone("$name|OK|" . '{"ok":true,"action":"set_task_enabled","plan_id":"p4","enabled":false,"unchanged":true,'
+  . '"before":{"enabled":false},"after":{"enabled":false,"collect_freq":6,"job_cfg":3}}');
+is(rd("task_collect_result"), "ObenSammeln: schon aus, nichts geaendert", "schon aus");
+
 print "\n$ok ok, $nok fehlgeschlagen\n";
 exit($nok ? 1 : 0);

@@ -24,7 +24,7 @@ use Symbol 'gensym';
 my $moduleName   = "Mammotion";
 my $helperScript = "/opt/fhem/FHEM/mammotion_helper.py";
 my $pythonBin    = "/usr/bin/python3.13";
-my $MODULE_VERSION = "1.11.0";
+my $MODULE_VERSION = "1.12.0";
 
 my %sets = (
     "update"       => "noArg",
@@ -38,6 +38,7 @@ my %sets = (
     "start_zone"   => "textField",
     "start_task"   => "textField",
     "task_collect" => "textField",
+    "task_enabled" => "textField",
     "selectDevice" => "textField",
 );
 
@@ -262,6 +263,20 @@ sub Mammotion_Set {
         Log3($name, 3, "[$name] Abladeintervall: $task_input (plan_id $plan_id) -> $m2 m2");
         readingsSingleUpdate($hash, "task_collect_result", "laeuft: $task_input -> $m2 m2", 1);
         Mammotion_SendCommand($hash, "set_task_collect", $deviceName, $iotId, $plan_id, $m2);
+        return undef;
+    }
+
+    if ($cmd eq "task_enabled") {
+        # Aufgabe ein-/ausschalten (v1.12.0): set <name> task_enabled <Aufgabe> 0|1
+        my $on = pop @args;
+        my $task_input = join(" ", @args);
+        return "Aufruf: set $name task_enabled <Aufgabe> 0|1  (z. B. MagnolieSammeln 0)"
+            if (!defined($on) || $on !~ /^[01]$/ || $task_input eq "");
+        my $plan_id = Mammotion_FindPlanId($name, $task_input);
+        return "Aufgabe '$task_input' nicht gefunden. Erst 'get $name tasks' ausfuehren." if (!$plan_id);
+        Log3($name, 3, "[$name] Aufgabe " . ($on ? "ein" : "aus") . ": $task_input (plan_id $plan_id)");
+        readingsSingleUpdate($hash, "task_collect_result", "laeuft: $task_input " . ($on ? "ein" : "aus"), 1);
+        Mammotion_SendCommand($hash, "set_task_enabled", $deviceName, $iotId, $plan_id, $on);
         return undef;
     }
 
@@ -587,7 +602,7 @@ sub Mammotion_SendCommand {
 
     my $timeout = ($action eq "get_zones") ? 240 :
                   ($action eq "start_zone") ? 240 :
-                  ($action eq "set_task_collect") ? 230 :
+                  ($action =~ /^set_task_(collect|enabled)$/) ? 230 :
                   ($action =~ /^(get_tasks|start_task)$/) ? 180 :
                   ($action eq "get_status") ? 90 : 90;
 
@@ -608,7 +623,7 @@ sub Mammotion_SendCommand {
         # Watchdog: BlockingCall-Timeout + 30s Puffer
         my $watchdog_timeout = ($action eq "get_zones") ? 270 :
                                ($action eq "start_zone") ? 270 :
-                               ($action eq "set_task_collect") ? 260 :
+                               ($action =~ /^set_task_(collect|enabled)$/) ? 260 :
                                ($action =~ /^(get_tasks|start_task)$/) ? 210 :
                                ($action eq "get_status") ? 120 : 120;
         InternalTimer(gettimeofday() + $watchdog_timeout, "Mammotion_WatchdogReset", $hash, 0);
@@ -705,15 +720,22 @@ sub Mammotion_TaskCollectDone {
             if (($tasks->[$k]{plan_id} // "") eq $pid) { $i = $k; $tname = $tasks->[$k]{name}; last; }
         }
     }
-    my $txt = $j->{unchanged}
-        ? "$tname: schon " . ($after->{collect_freq} // "?") . " m2, nichts geaendert"
-        : "$tname: " . ($j->{before}{collect_freq} // "?") . " -> " . ($after->{collect_freq} // "?") . " m2 ok"
-          . (@{$j->{also_changed} // []} ? " (ausserdem geaendert: " . join(",", @{$j->{also_changed}}) . ")" : "");
+    my $extra = @{$j->{also_changed} // []} ? " (ausserdem geaendert: " . join(",", @{$j->{also_changed}}) . ")" : "";
+    my $txt;
+    if (($j->{action} // "") eq "set_task_enabled") {
+        my $an = $after->{enabled} ? "ein" : "aus";
+        $txt = $j->{unchanged} ? "$tname: schon $an, nichts geaendert" : "$tname: $an ok$extra";
+    } else {
+        $txt = $j->{unchanged}
+            ? "$tname: schon " . ($after->{collect_freq} // "?") . " m2, nichts geaendert"
+            : "$tname: " . ($j->{before}{collect_freq} // "?") . " -> " . ($after->{collect_freq} // "?") . " m2 ok$extra";
+    }
     readingsBeginUpdate($hash);
     readingsBulkUpdate($hash, "task_collect_result", $txt);
     if (defined $i && ref($after) eq 'HASH' && %$after) {
         readingsBulkUpdate($hash, "task_${i}_collect_freq", $after->{collect_freq} // "");
         readingsBulkUpdate($hash, "task_${i}_job_cfg",      $after->{job_cfg}      // "");
+        readingsBulkUpdate($hash, "task_${i}_enabled",      defined($after->{enabled}) ? ($after->{enabled} ? 1 : 0) : "");
         readingsBulkUpdate($hash, "task_${i}_reserved",     join(",", @{$after->{reserved_raw} // []}));
         readingsBulkUpdate($hash, "task_${i}_detail",       encode_json($after));
     }
@@ -847,7 +869,7 @@ sub Mammotion_PythonDone {
         return;
     }
 
-    if ($action eq "set_task_collect") {
+    if ($action =~ /^set_task_(collect|enabled)$/) {
         Mammotion_TaskCollectDone($hash, $json_data, $timestamp);
         return;
     }
@@ -1231,6 +1253,8 @@ sub Mammotion_WatchdogReset {
     <li><code>task_collect &lt;id_oder_name&gt; &lt;m2&gt;</code> - Abladeintervall (Gras sammeln, in m&sup2;) einer
       gespeicherten Aufgabe setzen. Nur dieser Wert wird geaendert, alles andere (auch der Sammel-Modus) bleibt;
       danach wird die Aufgabe neu gelesen und geprueft, Ergebnis in <code>task_collect_result</code>.</li>
+    <li><code>task_enabled &lt;id_oder_name&gt; 0|1</code> - Gespeicherte Aufgabe aus-/einschalten; sonst wie
+      <code>task_collect</code> (nur das aktiv-Flag wird geaendert, Kontrolle danach).</li>
     <li><code>selectDevice &lt;name&gt;</code> - Geraet waehlen</li>
   </ul><br>
 

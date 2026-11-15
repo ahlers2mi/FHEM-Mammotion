@@ -26,6 +26,7 @@ Aktionen (MQTT):
   get_tasks        <device_name> <iot_id>
   start_task       <device_name> <iot_id> <plan_id>
   set_task_collect <device_name> <iot_id> <plan_id> <m2>   (v1.11.0)
+  set_task_enabled <device_name> <iot_id> <plan_id> <0|1>  (v1.12.0)
 """
 
 import sys
@@ -609,6 +610,59 @@ async def mqtt_action(account, password, device_name, iot_id, action, extra_para
                     after.get("collect_freq"), before.get("job_cfg"), after.get("job_cfg"))
             return res
 
+        elif action == "set_task_enabled":
+            # Aufgabe ein-/ausschalten (v1.12.0): nur reserved[2], Rest unveraendert
+            # als Edit zurueck; danach neu lesen und pruefen (Intervall und
+            # Sammel-Modus muessen gleich bleiben).
+            if len(extra_params) < 2 or str(extra_params[1]) not in ("0", "1"):
+                return {"ok": False, "error": "plan_id und 0|1 erforderlich"}
+            plan_id = str(extra_params[0])
+            want = str(extra_params[1]) == "1"
+            if not _new_api:
+                return {"ok": False, "error": "Aufgabe bearbeiten nur mit neuer pymammotion-API"}
+            try:
+                from pymammotion.data.model.hash_list import Plan as _Plan
+            except ImportError:
+                _Plan = None
+            if _Plan is None or not hasattr(_Plan, "reserved_for_send") or not hasattr(_Plan, "with_enabled"):
+                return {"ok": False, "error": "pymammotion ohne Plan.reserved_for_send/with_enabled - Schreiben gesperrt"}
+
+            plan = await _read_plan(device_name, plan_id)
+            if plan is None:
+                return {"ok": False, "error": "Aufgabe {} nicht gefunden".format(plan_id)}
+            before = _plan_detail(plan)
+            if before.get("enabled") is None:
+                return {"ok": False, "error": "aktiv-Flag der Aufgabe nicht lesbar: {}".format(before.get("reserved_raw"))}
+            if bool(before.get("enabled")) == want:
+                return {"ok": True, "action": "set_task_enabled", "plan_id": plan_id, "enabled": want,
+                        "unchanged": True, "before": before, "after": before}
+
+            await send(device_name, "edit_plan", plan=plan.with_enabled(want))
+            await asyncio.sleep(POST_SEND_SETTLE)
+
+            after = None
+            for _ in range(8):
+                await asyncio.sleep(5)
+                p2 = await _read_plan(device_name, plan_id, quick=(_ != 4), sync_timeout=30)
+                if p2 is not None:
+                    after = _plan_detail(p2)
+                    if after.get("enabled") == want:
+                        break
+            if after is None:
+                return {"ok": False, "action": "set_task_enabled", "plan_id": plan_id,
+                        "error": "gesendet, Kontrolle nicht moeglich (Aufgabe nicht neu gelesen)", "before": before}
+            changed = sorted(k for k in before
+                             if k not in ("enabled", "reserved_raw") and before.get(k) != after.get(k))
+            ok = (after.get("enabled") == want and after.get("job_cfg") == before.get("job_cfg")
+                  and after.get("collect_freq") == before.get("collect_freq"))
+            res = {"ok": ok, "action": "set_task_enabled", "plan_id": plan_id, "enabled": want,
+                   "before": before, "after": after, "also_changed": changed}
+            if not ok:
+                res["error"] = "Kontrolle fehlgeschlagen: aktiv {} job_cfg {}->{} Intervall {}->{}".format(
+                    after.get("enabled"), before.get("job_cfg"), after.get("job_cfg"),
+                    before.get("collect_freq"), after.get("collect_freq"))
+            return res
+
         elif action == "start_task":
             if not extra_params:
                 return {"ok": False, "error": "plan_id parameter required"}
@@ -754,7 +808,7 @@ async def run(account, password, action, params, app_version=DEFAULT_APP_VERSION
         "start_mowing", "stop_mowing", "pause_mowing", "resume_mowing",
         "return_home", "leave_dock", "along_border",
         "get_zones", "start_zone", "get_status", "get_tasks", "start_task",
-        "set_task_collect"
+        "set_task_collect", "set_task_enabled"
     }
 
     if action in mqtt_actions:
@@ -845,6 +899,7 @@ if __name__ == "__main__":
         "get_tasks":  (140, 160),
         "start_task": (140, 160),
         "set_task_collect": (205, 220),
+        "set_task_enabled": (205, 220),
         "get_status": (70, 80),
     }
     wf, wd = _budget.get(action, (50, 55))
